@@ -281,6 +281,11 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(capture);
 
         let _guard = tracing::subscriber::set_default(subscriber);
+        // Sibling tests may drive the router with no subscriber installed,
+        // caching this span's callsite interest as "disabled". Force a
+        // re-evaluation against the capture subscriber now that it is the
+        // current default so the span is observed regardless of test ordering.
+        tracing::callsite::rebuild_interest_cache();
 
         let _ = app()
             .oneshot(

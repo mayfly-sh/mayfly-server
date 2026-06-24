@@ -1,0 +1,65 @@
+# Mayfly Server configuration.
+#
+# Precedence (low to high): built-in defaults < this file < environment.
+# Environment overrides are prefixed MAYFLY_ and nest with `__`, e.g.:
+#   MAYFLY_SERVER__PORT=9443
+#   MAYFLY_LOGGING__FORMAT=json
+
+# `development` enables a self-signed certificate generated under
+# .mayfly/dev-certs/ so HTTPS works locally without supplying certificates.
+# Use `production` (the default when unset) with explicit TLS material below.
+environment: development
+
+server:
+  host: "127.0.0.1"
+  port: 8443
+  tls:
+    # Mayfly only serves HTTPS. In production, set cert_path and key_path:
+    #   cert_path: "/etc/mayfly/tls/cert.pem"
+    #   key_path: "/etc/mayfly/tls/key.pem"
+    enabled: true
+
+database:
+  url: "sqlite://mayfly.db"
+  max_connections: 5
+
+logging:
+  # `pretty` for local development, `json` for production aggregation.
+  format: pretty
+  level: "info"
+
+# GitHub OAuth app credentials for Device Flow authentication.
+# Both client_id and client_secret are REQUIRED — startup fails without them.
+# Prefer supplying the secret via the environment, not this file:
+#   MAYFLY_GITHUB__CLIENT_ID=Iv1.xxxxxxxx
+#   MAYFLY_GITHUB__CLIENT_SECRET=xxxxxxxx
+github:
+  client_id: "REPLACE_WITH_GITHUB_CLIENT_ID"
+  client_secret: "REPLACE_WITH_GITHUB_CLIENT_SECRET"
+  # scopes: "read:user user:email"          # default
+  # device_base_url: "https://github.com"   # override for GitHub Enterprise
+  # api_base_url: "https://api.github.com"
+
+# SSH certificate authority. The CA key must be an ENCRYPTED OpenSSH Ed25519
+# private key. The passphrase is read from the named environment variable at
+# startup (never stored in config). Generate a dev CA, e.g.:
+#   ssh-keygen -t ed25519 -f ./ca/ca_key -C mayfly-ca   # set a passphrase
+#   export CA_PASSPHRASE='your-passphrase'
+# Startup fails fast if the key is missing, undecryptable, or not Ed25519.
+# NOTE: passphrase_env must NOT start with `MAYFLY_` — that prefix is reserved
+# for config env vars and would be intercepted by the config loader.
+ca:
+  private_key_path: "./ca/ca_key"
+  passphrase_env: "CA_PASSPHRASE"
+  key_id: "mayfly-ca"
+
+# Authorization allowlists (deny-by-default). A caller may obtain a certificate
+# only if their GitHub login is in allowed_users, OR one of their orgs is in
+# allowed_orgs, OR one of their teams (formatted "org-login/team-slug") is in
+# allowed_teams. Leaving all three empty denies everyone. Matching is
+# case-insensitive. Org/team membership is only queried from GitHub when the
+# corresponding list is non-empty (and may require the read:org scope).
+access:
+  allowed_users: [""]
+  allowed_orgs: []
+  allowed_teams: []

@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1.89"
 axum = { version = "0.8", features = ["http2"] }
 chrono = { version = "0.4", default-features = false, features = [
     "clock",
@@ -24,6 +25,23 @@ chrono = { version = "0.4", default-features = false, features = [
 ] }
 figment = { version = "0.10", features = ["yaml", "env"] }
 hex = "0.4"
+# hyper-util provides the protocol-auto-negotiating connection builder
+# (HTTP/1.1 + HTTP/2) and the tower<->hyper service adapter.
+hyper-util = { version = "0.1", features = [
+    "server",
+    "server-auto",
+    "service",
+    "tokio",
+] }
+# rustls with the `ring` provider only — no aws-lc, no OpenSSL.
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2"] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "logging",
+] }
+rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -32,8 +50,20 @@ sqlx = { version = "0.8", default-features = false, features = [
     "sqlite",
     "macros",
 ] }
+ssh-key = { version = "0.6.7", default-features = false, features = ["ed25519", "encryption", "std", "getrandom"] }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "signal",
+    "io-util",
+    "time",
+] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "logging",
+] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
@@ -48,6 +78,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
 # `test` enables figment::Jail for isolated env/file config tests.
 figment = { version = "0.10", features = ["yaml", "env", "test"] }
+wiremock = "0.6.5"
+# `p256` (dev only) lets tests generate a non-Ed25519 key to exercise the
+# CA's algorithm-rejection path. It is not compiled into the release binary.
+ssh-key = { version = "0.6", default-features = false, features = ["p256"] }
 
 [profile.dev.package.sqlx-macros]
 opt-level = 3

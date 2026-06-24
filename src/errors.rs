@@ -13,28 +13,24 @@ use serde::Serialize;
 use thiserror::Error;
 
 /// Errors surfaced by the audit subsystem.
+///
+/// Note: a *broken chain* is a verification **finding**, not an error — it is
+/// represented by [`crate::audit::AuditVerificationResult`]. This type only
+/// covers operational failures (serialization, persistence, corrupt rows).
 #[derive(Debug, Error)]
 pub enum AuditError {
-    /// Hash computation or validation failed.
-    #[error("audit hash error: {0}")]
-    Hash(String),
+    /// Failed to produce canonical JSON for hashing.
+    #[error("audit serialization error: {0}")]
+    Serialization(String),
 
-    /// Chain verification detected a broken link.
-    #[error("audit chain broken at position {position}: {reason}")]
-    ChainBroken {
-        /// `chain_position` of the first invalid entry.
-        position: i64,
-        /// Human-readable explanation.
-        reason: String,
-    },
+    /// A stored audit row could not be parsed back into a domain type. This
+    /// usually indicates corruption or out-of-band tampering with the database.
+    #[error("corrupt audit row: {0}")]
+    Corrupt(String),
 
     /// Database persistence error.
     #[error("audit repository error: {0}")]
     Repository(#[from] sqlx::Error),
-
-    /// Entry not found.
-    #[error("audit entry not found at chain position {0}")]
-    NotFound(i64),
 }
 
 /// The unified error type returned by HTTP handlers.
@@ -76,6 +72,10 @@ pub enum ApiError {
     #[error("{0}")]
     Conflict(String),
 
+    /// 429 — too many requests (e.g. an upstream rate limit).
+    #[error("{0}")]
+    TooManyRequests(String),
+
     /// 500 — an unexpected internal failure. Cause is logged, not returned.
     #[error("internal server error")]
     Internal(#[source] anyhow::Error),
@@ -90,6 +90,7 @@ impl ApiError {
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -102,6 +103,7 @@ impl ApiError {
             ApiError::Forbidden(_) => "forbidden",
             ApiError::NotFound(_) => "not_found",
             ApiError::Conflict(_) => "conflict",
+            ApiError::TooManyRequests(_) => "rate_limited",
             ApiError::Internal(_) => "internal_error",
         }
     }
@@ -163,26 +165,10 @@ impl IntoResponse for ApiError {
 
 impl From<AuditError> for ApiError {
     fn from(err: AuditError) -> Self {
-        match err {
-            AuditError::NotFound(position) => {
-                ApiError::NotFound(format!("audit entry not found at chain position {position}"))
-            }
-            // Tamper detection is a security event: emit a distinct, high-severity
-            // signal before collapsing into a generic internal error for the client.
-            AuditError::ChainBroken { position, reason } => {
-                tracing::error!(
-                    target: "mayfly::security",
-                    position,
-                    reason = %reason,
-                    "audit chain integrity violation detected"
-                );
-                ApiError::Internal(anyhow::anyhow!(
-                    "audit chain integrity violation at position {position}: {reason}"
-                ))
-            }
-            // Other integrity and persistence failures are internal concerns.
-            other => ApiError::Internal(anyhow::Error::new(other)),
-        }
+        // Every `AuditError` is a server-side operational failure; its cause is
+        // logged (never returned) by `ApiError::Internal`. Chain-integrity
+        // *findings* are surfaced as `AuditVerificationResult`, not as errors.
+        ApiError::Internal(anyhow::Error::new(err))
     }
 }
 
@@ -240,19 +226,15 @@ mod tests {
     }
 
     #[test]
-    fn audit_not_found_maps_to_api_not_found() {
-        let api: ApiError = AuditError::NotFound(3).into();
-        assert_eq!(api.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[test]
-    fn audit_integrity_failure_maps_to_internal() {
-        let api: ApiError = AuditError::ChainBroken {
-            position: 2,
-            reason: "tamper".into(),
+    fn audit_errors_map_to_internal_without_leaking_cause() {
+        for err in [
+            AuditError::Serialization("canonical json failed".into()),
+            AuditError::Corrupt("bad recorded_at".into()),
+        ] {
+            let api: ApiError = err.into();
+            assert_eq!(api.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(api.code(), "internal_error");
+            assert_eq!(api.client_message(), "internal server error");
         }
-        .into();
-        assert_eq!(api.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(api.client_message(), "internal server error");
     }
 }

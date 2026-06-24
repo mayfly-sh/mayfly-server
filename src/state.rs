@@ -9,8 +9,12 @@ use std::sync::Arc;
 use chrono::{DateTime, TimeDelta, Utc};
 use sqlx::SqlitePool;
 
+use crate::audit::AuditService;
+use crate::authz::AuthzService;
+use crate::ca::CaService;
 use crate::clock::Clock;
 use crate::config::Config;
+use crate::github::{GitHubClient, UnconfiguredGitHubClient};
 
 /// Application-wide shared state.
 #[derive(Clone)]
@@ -21,6 +25,10 @@ pub struct AppState {
     db: SqlitePool,
     /// Time source; never call `Utc::now()` directly in handlers.
     clock: Arc<dyn Clock>,
+    /// GitHub API client (dependency-injected; real or mock).
+    github: Arc<dyn GitHubClient>,
+    /// SSH certificate authority, loaded at startup. `None` until injected.
+    ca: Option<Arc<CaService>>,
     /// When the process finished initializing, per `clock`.
     started_at: DateTime<Utc>,
 }
@@ -28,14 +36,56 @@ pub struct AppState {
 impl AppState {
     /// Construct application state, capturing the startup timestamp from the
     /// provided clock so it is consistent with all other time reads.
+    ///
+    /// The GitHub client defaults to a fail-fast stub; production wires a real
+    /// client via [`AppState::with_github`].
     pub fn new(config: Config, db: SqlitePool, clock: Arc<dyn Clock>) -> Self {
         let started_at = clock.now();
         Self {
             config: Arc::new(config),
             db,
             clock,
+            github: Arc::new(UnconfiguredGitHubClient),
+            ca: None,
             started_at,
         }
+    }
+
+    /// Inject the GitHub client (builder style).
+    #[must_use]
+    pub fn with_github(mut self, github: Arc<dyn GitHubClient>) -> Self {
+        self.github = github;
+        self
+    }
+
+    /// Inject the SSH certificate authority (builder style).
+    #[must_use]
+    pub fn with_ca(mut self, ca: Arc<CaService>) -> Self {
+        self.ca = Some(ca);
+        self
+    }
+
+    /// Borrow the GitHub client handle.
+    pub fn github(&self) -> Arc<dyn GitHubClient> {
+        Arc::clone(&self.github)
+    }
+
+    /// The SSH certificate authority, if one has been injected.
+    pub fn ca(&self) -> Option<Arc<CaService>> {
+        self.ca.clone()
+    }
+
+    /// Build an [`AuditService`] over the shared pool and clock.
+    ///
+    /// Cheap to construct (it only holds clonable handles), so handlers create
+    /// one per request rather than storing it.
+    pub fn audit(&self) -> AuditService {
+        AuditService::from_pool(self.db.clone(), Arc::clone(&self.clock))
+    }
+
+    /// Build an [`AuthzService`] from the configured access allowlists.
+    pub fn authz(&self) -> AuthzService {
+        AuthzService::new(self.config.access.clone())
     }
 
     /// Borrow the configuration.

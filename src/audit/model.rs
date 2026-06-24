@@ -1,87 +1,139 @@
 //! Audit log domain types.
+//!
+//! The audit log is a generic, tamper-evident record of security events. An
+//! event is described by an `event_type`, the `actor` that triggered it, an
+//! optional `subject` (the target), and free-form structured `metadata`.
+//! Certificate issuance, OAuth logins, and policy changes will all be recorded
+//! as events with different `event_type`s rather than bespoke tables.
 
-use serde::{Deserialize, Serialize};
+use crate::audit::hash;
+use crate::errors::AuditError;
+use chrono::{DateTime, Utc};
+use serde_json::Value;
 
-/// Canonical payload hashed for each audit entry.
+/// Fields a caller provides to record a new audit event.
 ///
-/// Field order is fixed by struct declaration so `serde_json` output is stable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuditHashInput {
-    /// Certificate serial number.
-    pub serial: String,
-    /// Unix username granted by the certificate.
-    pub username: String,
-    /// GitHub login of the requester.
-    pub github_login: String,
-    /// Target host the certificate is valid for.
-    pub hostname: String,
-    /// ISO 8601 timestamp when the certificate was issued.
-    pub issued_at: String,
-    /// Certificate time-to-live in seconds.
-    pub ttl_seconds: i64,
-    /// SHA-256 fingerprint of the issued certificate.
-    pub cert_fingerprint: String,
-}
-
-/// Fields required to append a new audit log entry (hashes computed on insert).
+/// The chain metadata (`chain_position`, `previous_hash`, `canonical_json`,
+/// `entry_hash`) and the persistence timestamp (`recorded_at`) are assigned by
+/// the service and repository — callers never supply them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewAuditLogEntry {
-    pub serial: String,
-    pub username: String,
-    pub github_login: String,
-    pub hostname: String,
-    pub issued_at: String,
-    pub hashed_at: String,
-    pub ttl_seconds: i64,
-    pub requester_ip: Option<String>,
-    pub cert_fingerprint: String,
+pub struct NewAuditEntry {
+    /// Dotted event identifier, e.g. `"certificate.issued"`.
+    pub event_type: String,
+    /// Who or what triggered the event, e.g. a GitHub login or `"system"`.
+    pub actor: String,
+    /// Optional target of the action, e.g. a hostname or certificate serial.
+    pub subject: Option<String>,
+    /// Structured, event-specific detail. Object keys are serialized in sorted
+    /// order, so canonicalization is independent of insertion order.
+    pub metadata: Value,
 }
 
-impl NewAuditLogEntry {
-    /// Build the canonical hash input from issuance metadata.
-    pub fn hash_input(&self) -> AuditHashInput {
-        AuditHashInput {
-            serial: self.serial.clone(),
-            username: self.username.clone(),
-            github_login: self.github_login.clone(),
-            hostname: self.hostname.clone(),
-            issued_at: self.issued_at.clone(),
-            ttl_seconds: self.ttl_seconds,
-            cert_fingerprint: self.cert_fingerprint.clone(),
+impl NewAuditEntry {
+    /// Build an event with no subject and empty (`null`) metadata.
+    pub fn new(event_type: impl Into<String>, actor: impl Into<String>) -> Self {
+        Self {
+            event_type: event_type.into(),
+            actor: actor.into(),
+            subject: None,
+            metadata: Value::Null,
         }
+    }
+
+    /// Set the event subject (the target of the action).
+    #[must_use]
+    pub fn with_subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
+    }
+
+    /// Attach structured metadata.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: Value) -> Self {
+        self.metadata = metadata;
+        self
     }
 }
 
-/// A persisted audit log entry including hash-chain metadata.
+/// A persisted audit entry, including its hash-chain metadata.
+///
+/// Invariant enforced by [`crate::audit::verifier`]: `canonical_json` is the
+/// deterministic serialization of every business column, and `entry_hash =
+/// SHA256(canonical_json || previous_hash)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuditLogEntry {
+pub struct AuditEntry {
+    /// SQLite rowid (storage detail; not part of the hash).
     pub id: i64,
+    /// 1-based position in the chain.
     pub chain_position: i64,
-    pub serial: String,
-    pub username: String,
-    pub github_login: String,
-    pub hostname: String,
-    pub issued_at: String,
-    pub hashed_at: String,
-    pub ttl_seconds: i64,
-    pub requester_ip: Option<String>,
-    pub cert_fingerprint: String,
+    /// Dotted event identifier.
+    pub event_type: String,
+    /// Who or what triggered the event.
+    pub actor: String,
+    /// Optional target of the action.
+    pub subject: Option<String>,
+    /// Structured, event-specific detail.
+    pub metadata: Value,
+    /// When the event was recorded, truncated to millisecond precision.
+    pub recorded_at: DateTime<Utc>,
+    /// `entry_hash` of the preceding entry, or the genesis hash for the first.
     pub previous_hash: String,
+    /// Stored canonical serialization of this entry's business columns.
+    pub canonical_json: String,
+    /// `SHA256(canonical_json || previous_hash)`, hex-encoded.
     pub entry_hash: String,
 }
 
-impl AuditLogEntry {
-    /// Build the canonical hash input from a stored entry.
-    pub fn hash_input(&self) -> AuditHashInput {
-        AuditHashInput {
-            serial: self.serial.clone(),
-            username: self.username.clone(),
-            github_login: self.github_login.clone(),
-            hostname: self.hostname.clone(),
-            issued_at: self.issued_at.clone(),
-            ttl_seconds: self.ttl_seconds,
-            cert_fingerprint: self.cert_fingerprint.clone(),
-        }
+impl AuditEntry {
+    /// Recompute the canonical JSON from this entry's business columns.
+    ///
+    /// Used by verification to detect column-level tampering: the result must
+    /// equal the stored [`AuditEntry::canonical_json`].
+    pub fn recompute_canonical_json(&self) -> Result<String, AuditError> {
+        hash::canonicalize(
+            self.chain_position,
+            &self.event_type,
+            &self.actor,
+            self.subject.as_deref(),
+            &self.recorded_at,
+            &self.metadata,
+        )
+    }
+}
+
+/// The current head of the audit chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditTip {
+    /// Chain position of the latest entry.
+    pub chain_position: i64,
+    /// `entry_hash` of the latest entry — the value the next append links to.
+    pub entry_hash: String,
+}
+
+/// Outcome of verifying the audit chain.
+///
+/// A broken chain is a *finding*, not an error; operational failures while
+/// loading the chain are reported separately as [`AuditError`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuditVerificationResult {
+    /// Every link verified successfully.
+    Valid {
+        /// Number of entries checked.
+        entries_verified: u64,
+    },
+    /// The chain is broken at `position`.
+    Broken {
+        /// Sequence at which the first failure was detected.
+        position: i64,
+        /// Human-readable explanation of the failure.
+        reason: String,
+    },
+}
+
+impl AuditVerificationResult {
+    /// `true` when the chain verified successfully.
+    pub fn is_valid(&self) -> bool {
+        matches!(self, AuditVerificationResult::Valid { .. })
     }
 }
 
@@ -89,26 +141,25 @@ impl AuditLogEntry {
 mod tests {
     use super::*;
 
-    fn sample_new_entry() -> NewAuditLogEntry {
-        NewAuditLogEntry {
-            serial: "01".into(),
-            username: "alice".into(),
-            github_login: "alice-github".into(),
-            hostname: "web-01".into(),
-            issued_at: "2026-06-24T12:00:00Z".into(),
-            hashed_at: "2026-06-24T12:00:01Z".into(),
-            ttl_seconds: 3600,
-            requester_ip: Some("203.0.113.10".into()),
-            cert_fingerprint: "abc123".into(),
-        }
+    #[test]
+    fn builder_sets_subject_and_metadata() {
+        let entry = NewAuditEntry::new("certificate.issued", "octocat")
+            .with_subject("web-01")
+            .with_metadata(serde_json::json!({ "serial": "01" }));
+
+        assert_eq!(entry.event_type, "certificate.issued");
+        assert_eq!(entry.actor, "octocat");
+        assert_eq!(entry.subject.as_deref(), Some("web-01"));
+        assert_eq!(entry.metadata["serial"], "01");
     }
 
     #[test]
-    fn hash_input_excludes_non_canonical_fields() {
-        let entry = sample_new_entry();
-        let input = entry.hash_input();
-        assert_eq!(input.serial, "01");
-        assert_eq!(input.username, "alice");
-        assert_eq!(input.ttl_seconds, 3600);
+    fn verification_result_is_valid_helper() {
+        assert!(AuditVerificationResult::Valid { entries_verified: 3 }.is_valid());
+        assert!(!AuditVerificationResult::Broken {
+            position: 2,
+            reason: "x".into()
+        }
+        .is_valid());
     }
 }
