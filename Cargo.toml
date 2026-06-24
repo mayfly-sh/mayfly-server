@@ -1,0 +1,53 @@
+[package]
+name = "mayfly-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Zero-trust SSH certificate authority and control plane"
+license = "Apache-2.0"
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "mayfly-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["http2"] }
+chrono = { version = "0.4", default-features = false, features = [
+    "clock",
+    "serde",
+    "std",
+] }
+figment = { version = "0.10", features = ["yaml", "env"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "macros",
+] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+    "fmt",
+    "json",
+] }
+uuid = { version = "1", features = ["v7"] }
+
+[dev-dependencies]
+proptest = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
+# `test` enables figment::Jail for isolated env/file config tests.
+figment = { version = "0.10", features = ["yaml", "env", "test"] }
+
+[profile.dev.package.sqlx-macros]
+opt-level = 3
