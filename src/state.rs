@@ -9,9 +9,11 @@ use std::sync::Arc;
 use chrono::{DateTime, TimeDelta, Utc};
 use sqlx::SqlitePool;
 
+use crate::agentauth::{InMemoryNonceCache, NonceCache};
 use crate::audit::AuditService;
 use crate::authz::AuthzService;
-use crate::ca::CaService;
+use crate::bundle::{BundleService, BundleSigner};
+use crate::ca::{CaManager, OsRandom, RandomSource};
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::github::{GitHubClient, UnconfiguredGitHubClient};
@@ -27,8 +29,17 @@ pub struct AppState {
     clock: Arc<dyn Clock>,
     /// GitHub API client (dependency-injected; real or mock).
     github: Arc<dyn GitHubClient>,
-    /// SSH certificate authority, loaded at startup. `None` until injected.
-    ca: Option<Arc<CaService>>,
+    /// SSH certificate-authority manager, loaded at startup. `None` until
+    /// injected. The manager is the single owner of all CA key state.
+    ca: Option<Arc<CaManager>>,
+    /// Dedicated Bundle Signing Key used to sign the CA trust bundle. `None`
+    /// until injected (the agent bundle endpoints require it).
+    bundle_signer: Option<Arc<dyn BundleSigner>>,
+    /// CSPRNG used to jitter agent polling intervals. Injected for determinism
+    /// in tests; defaults to the OS CSPRNG.
+    jitter: Arc<dyn RandomSource>,
+    /// Replay-protection nonce cache shared across requests.
+    nonce_cache: Arc<dyn NonceCache>,
     /// When the process finished initializing, per `clock`.
     started_at: DateTime<Utc>,
 }
@@ -47,8 +58,24 @@ impl AppState {
             clock,
             github: Arc::new(UnconfiguredGitHubClient),
             ca: None,
+            bundle_signer: None,
+            jitter: Arc::new(OsRandom),
+            nonce_cache: Arc::new(InMemoryNonceCache::new()),
             started_at,
         }
+    }
+
+    /// Inject a custom nonce cache (builder style); defaults to an in-memory
+    /// cache. Exposed primarily so tests can supply a shared instance.
+    #[must_use]
+    pub fn with_nonce_cache(mut self, nonce_cache: Arc<dyn NonceCache>) -> Self {
+        self.nonce_cache = nonce_cache;
+        self
+    }
+
+    /// Borrow the replay-protection nonce cache.
+    pub fn nonce_cache(&self) -> Arc<dyn NonceCache> {
+        Arc::clone(&self.nonce_cache)
     }
 
     /// Inject the GitHub client (builder style).
@@ -58,9 +85,9 @@ impl AppState {
         self
     }
 
-    /// Inject the SSH certificate authority (builder style).
+    /// Inject the SSH certificate-authority manager (builder style).
     #[must_use]
-    pub fn with_ca(mut self, ca: Arc<CaService>) -> Self {
+    pub fn with_ca(mut self, ca: Arc<CaManager>) -> Self {
         self.ca = Some(ca);
         self
     }
@@ -70,9 +97,49 @@ impl AppState {
         Arc::clone(&self.github)
     }
 
-    /// The SSH certificate authority, if one has been injected.
-    pub fn ca(&self) -> Option<Arc<CaService>> {
+    /// The SSH certificate-authority manager, if one has been injected.
+    pub fn ca(&self) -> Option<Arc<CaManager>> {
         self.ca.clone()
+    }
+
+    /// Inject the Bundle Signing Key (builder style).
+    #[must_use]
+    pub fn with_bundle_signer(mut self, signer: Arc<dyn BundleSigner>) -> Self {
+        self.bundle_signer = Some(signer);
+        self
+    }
+
+    /// The Bundle Signing Key, if one has been injected.
+    pub fn bundle_signer(&self) -> Option<Arc<dyn BundleSigner>> {
+        self.bundle_signer.clone()
+    }
+
+    /// Inject the polling-jitter CSPRNG (builder style); defaults to the OS
+    /// CSPRNG. Exposed so tests can supply a deterministic source.
+    #[must_use]
+    pub fn with_jitter(mut self, jitter: Arc<dyn RandomSource>) -> Self {
+        self.jitter = jitter;
+        self
+    }
+
+    /// The polling-jitter CSPRNG handle.
+    pub fn jitter(&self) -> Arc<dyn RandomSource> {
+        Arc::clone(&self.jitter)
+    }
+
+    /// Build a [`BundleService`] over the shared pool, CA manager, signer, and
+    /// clock. Returns `None` when the CA manager or signer is absent (the agent
+    /// bundle endpoints then fail closed with a configuration error).
+    pub fn bundle_service(&self) -> Option<BundleService> {
+        let ca = self.ca.clone()?;
+        let signer = self.bundle_signer.clone()?;
+        Some(BundleService::new(
+            self.db.clone(),
+            ca,
+            signer,
+            Arc::clone(&self.clock),
+            self.config.bundle.ttl_seconds,
+        ))
     }
 
     /// Build an [`AuditService`] over the shared pool and clock.

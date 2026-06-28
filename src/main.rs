@@ -6,7 +6,8 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use mayfly_server::ca::CaService;
+use mayfly_server::bundle::{BundleSigner, Ed25519BundleSigner};
+use mayfly_server::ca::CaManager;
 use mayfly_server::clock::SystemClock;
 use mayfly_server::config::Config;
 use mayfly_server::github::RealGitHubClient;
@@ -50,21 +51,46 @@ async fn main() -> anyhow::Result<()> {
     // 4. GitHub client (validated config guarantees credentials are present).
     let github = Arc::new(RealGitHubClient::from_config(&config.github));
 
-    // 5. Certificate authority (fail-fast: loads and decrypts the CA key now).
+    // 5. Certificate authority (fail-fast: loads, decrypts, and validates every
+    //    stored CA, bootstrapping a first CA when storage is empty). Never logs
+    //    key material or passphrases.
     let clock = Arc::new(SystemClock);
-    let ca = Arc::new(CaService::from_config(&config.ca, clock.clone())?);
+    let ca = Arc::new(
+        CaManager::from_config(&config.ca, pool.clone(), clock.clone())
+            .await
+            .context("failed to load the certificate authority")?,
+    );
     tracing::info!(
-        key_id = %config.ca.key_id,
-        ca_public_key = %ca.get_ca_public_key()?,
+        generation = ca.generation(),
+        key_count = ca.key_count(),
+        active_keys = ca.active_key_count(),
+        bundle_fingerprint = %ca.bundle_fingerprint(),
         "ssh certificate authority loaded",
     );
 
-    // 6. Shared application state with the production clock.
+    // 6. Bundle Signing Key — a dedicated Ed25519 key (NOT an SSH CA) used only
+    //    to sign the CA trust bundle. Loaded from the configured environment
+    //    variable, else generated and persisted under the CA storage directory.
+    //    Never logs the seed.
+    let bundle_signer = Arc::new(
+        Ed25519BundleSigner::load_or_create(
+            &config.bundle.signing_key_env,
+            std::path::Path::new(&config.ca.storage_directory),
+        )
+        .map_err(|err| anyhow::anyhow!("failed to load the bundle signing key: {err}"))?,
+    );
+    tracing::info!(
+        signing_public_key = %bundle_signer.public_key_b64(),
+        "bundle signing key ready",
+    );
+
+    // 7. Shared application state with the production clock.
     let state = AppState::new(config, pool, clock)
         .with_github(github)
-        .with_ca(ca);
+        .with_ca(ca)
+        .with_bundle_signer(bundle_signer);
 
-    // 7. Serve HTTPS until a shutdown signal is received.
+    // 8. Serve HTTPS until a shutdown signal is received.
     server::run(state).await?;
 
     tracing::info!("server stopped");

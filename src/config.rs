@@ -19,6 +19,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::ca::SelectionStrategy;
 use crate::environment::Environment;
 use crate::secret::Secret;
 
@@ -74,6 +75,9 @@ pub struct Config {
     /// SSH certificate authority settings.
     #[serde(default)]
     pub ca: CaConfig,
+    /// CA bundle distribution settings (signing, polling cadence, TTL).
+    #[serde(default)]
+    pub bundle: BundleConfig,
     /// Authorization allowlists (deny-by-default).
     #[serde(default)]
     pub access: AccessConfig,
@@ -197,25 +201,108 @@ impl GithubConfig {
 
 /// SSH certificate authority configuration.
 ///
-/// The CA passphrase is never stored in config: only the *name* of the
-/// environment variable that holds it is configured, and it is read at startup.
+/// Mayfly is a CA management server: it manages between 1 and
+/// [`crate::ca::MAX_CA_KEYS`] CAs whose metadata lives in the database and whose
+/// encrypted private keys live on disk under `storage_directory`. CAs are
+/// **not** listed here — they are created/imported through the admin API and
+/// loaded from storage at startup.
+///
+/// No passphrase is stored in config: only the *name* of the environment
+/// variable holding the single storage passphrase (used to encrypt every CA
+/// key at rest) is configured, and it is read at startup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaConfig {
-    /// Path to the encrypted OpenSSH Ed25519 CA private key.
-    pub private_key_path: PathBuf,
-    /// Name of the environment variable holding the key's passphrase.
+    /// Directory holding the encrypted CA private key files.
+    #[serde(default = "default_storage_directory")]
+    pub storage_directory: String,
+    /// How a signing CA is chosen among the enabled CAs.
+    #[serde(default)]
+    pub selection_strategy: SelectionStrategy,
+    /// Whether to load all stored CAs at startup (and bootstrap a first CA when
+    /// storage is empty).
+    #[serde(default = "default_auto_load")]
+    pub auto_load: bool,
+    /// Name of the environment variable holding the storage passphrase that
+    /// encrypts every CA key at rest.
+    #[serde(default = "default_passphrase_env")]
     pub passphrase_env: String,
-    /// `key_id` embedded in issued certificates.
-    pub key_id: String,
+}
+
+fn default_storage_directory() -> String {
+    "./ca".to_string()
+}
+
+fn default_auto_load() -> bool {
+    true
+}
+
+fn default_passphrase_env() -> String {
+    "CA_STORAGE_PASSPHRASE".to_string()
 }
 
 impl Default for CaConfig {
     fn default() -> Self {
         Self {
-            private_key_path: PathBuf::from("./ca/ca_key"),
-            passphrase_env: "CA_PASSPHRASE".to_string(),
-            key_id: "mayfly-ca".to_string(),
+            storage_directory: default_storage_directory(),
+            selection_strategy: SelectionStrategy::default(),
+            auto_load: default_auto_load(),
+            passphrase_env: default_passphrase_env(),
+        }
+    }
+}
+
+/// CA bundle distribution configuration.
+///
+/// Controls how the signed CA trust bundle is produced and how often agents
+/// poll for it. The Bundle Signing Key (a dedicated Ed25519 key, separate from
+/// the SSH CA keys) is loaded from the environment variable named by
+/// `signing_key_env` (a base64 32-byte seed); if that is unset, the server
+/// manages the key on disk under the CA `storage_directory`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleConfig {
+    /// Base interval, in seconds, the server suggests agents wait between CA
+    /// bundle polls. Agents apply jitter on top of this.
+    #[serde(default = "default_sync_interval_seconds")]
+    pub sync_interval_seconds: u32,
+    /// Random jitter applied to the poll interval, as a percentage (0–100).
+    /// `60s` at `10%` yields a `54–66s` interval.
+    #[serde(default = "default_jitter_percent")]
+    pub jitter_percent: u8,
+    /// Validity window of a signed bundle, in seconds (`expires_at =
+    /// created_at + ttl_seconds`). Agents must reject expired bundles.
+    #[serde(default = "default_bundle_ttl_seconds")]
+    pub ttl_seconds: u32,
+    /// Name of the environment variable holding the base64 Bundle Signing Key
+    /// seed. Optional: when unset the key is generated and persisted on disk.
+    #[serde(default = "default_bundle_signing_key_env")]
+    pub signing_key_env: String,
+}
+
+fn default_sync_interval_seconds() -> u32 {
+    300
+}
+
+fn default_jitter_percent() -> u8 {
+    10
+}
+
+fn default_bundle_ttl_seconds() -> u32 {
+    3600
+}
+
+fn default_bundle_signing_key_env() -> String {
+    "BUNDLE_SIGNING_KEY".to_string()
+}
+
+impl Default for BundleConfig {
+    fn default() -> Self {
+        Self {
+            sync_interval_seconds: default_sync_interval_seconds(),
+            jitter_percent: default_jitter_percent(),
+            ttl_seconds: default_bundle_ttl_seconds(),
+            signing_key_env: default_bundle_signing_key_env(),
         }
     }
 }
@@ -395,12 +482,13 @@ impl Config {
             ));
         }
 
-        // CA paths/identifiers must be present. The key file's existence,
-        // decryptability, and algorithm are verified when the CA is loaded at
-        // startup (see `CaService::from_config`), which fails fast.
-        if self.ca.private_key_path.as_os_str().is_empty() {
+        // CA: validate the storage configuration. The authoritative checks (at
+        // least one enabled CA, the 1..=64 count, duplicate ids/public
+        // keys/fingerprints, decryptability, and Ed25519 algorithm) run when
+        // the `CaManager` loads from storage at startup, which fails fast.
+        if self.ca.storage_directory.trim().is_empty() {
             return Err(ConfigError::Validation(
-                "ca.private_key_path must not be empty".to_string(),
+                "ca.storage_directory must not be empty".to_string(),
             ));
         }
         if self.ca.passphrase_env.trim().is_empty() {
@@ -422,14 +510,45 @@ impl Config {
             return Err(ConfigError::Validation(format!(
                 "ca.passphrase_env '{}' must not start with 'MAYFLY_': that prefix is reserved \
                  for configuration environment variables and would be intercepted by the config \
-                 loader. Use a non-prefixed name such as 'CA_PASSPHRASE'.",
+                 loader. Use a non-prefixed name such as 'CA_STORAGE_PASSPHRASE'.",
                 self.ca.passphrase_env
             )));
         }
-        if self.ca.key_id.trim().is_empty() {
+
+        // -- bundle distribution ------------------------------------------
+        if self.bundle.sync_interval_seconds == 0 {
             return Err(ConfigError::Validation(
-                "ca.key_id must not be empty".to_string(),
+                "bundle.sync_interval_seconds must be at least 1".to_string(),
             ));
+        }
+        if self.bundle.jitter_percent > 100 {
+            return Err(ConfigError::Validation(
+                "bundle.jitter_percent must be between 0 and 100".to_string(),
+            ));
+        }
+        if self.bundle.ttl_seconds == 0 {
+            return Err(ConfigError::Validation(
+                "bundle.ttl_seconds must be at least 1".to_string(),
+            ));
+        }
+        if self.bundle.signing_key_env.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "bundle.signing_key_env must not be empty".to_string(),
+            ));
+        }
+        if self
+            .bundle
+            .signing_key_env
+            .trim()
+            .to_ascii_uppercase()
+            .starts_with("MAYFLY_")
+        {
+            return Err(ConfigError::Validation(format!(
+                "bundle.signing_key_env '{}' must not start with 'MAYFLY_': that prefix is \
+                 reserved for configuration environment variables. Use a non-prefixed name such \
+                 as 'BUNDLE_SIGNING_KEY'.",
+                self.bundle.signing_key_env
+            )));
         }
 
         Ok(())
@@ -699,9 +818,30 @@ github:
   client_secret: "shh"
 "#;
         let config = Config::from_figment(figment_from_yaml(yaml)).expect("valid");
-        assert_eq!(config.ca.private_key_path.to_str().unwrap(), "./ca/ca_key");
-        assert_eq!(config.ca.passphrase_env, "CA_PASSPHRASE");
-        assert_eq!(config.ca.key_id, "mayfly-ca");
+        assert_eq!(config.ca.storage_directory, "./ca");
+        assert_eq!(config.ca.selection_strategy, SelectionStrategy::Random);
+        assert!(config.ca.auto_load);
+        assert_eq!(config.ca.passphrase_env, "CA_STORAGE_PASSPHRASE");
+    }
+
+    #[test]
+    fn ca_storage_config_is_parsed() {
+        let yaml = r#"
+server:
+  tls:
+    enabled: false
+github:
+  client_id: "Iv1.test"
+  client_secret: "shh"
+ca:
+  storage_directory: "/var/lib/mayfly/ca"
+  selection_strategy: random
+  auto_load: false
+  passphrase_env: "CA_STORAGE_PASSPHRASE"
+"#;
+        let config = Config::from_figment(figment_from_yaml(yaml)).expect("valid");
+        assert_eq!(config.ca.storage_directory, "/var/lib/mayfly/ca");
+        assert!(!config.ca.auto_load);
     }
 
     #[test]
@@ -716,14 +856,12 @@ github:
   client_id: "Iv1.test"
   client_secret: "shh"
 ca:
-  private_key_path: "./ca/ca_key"
   passphrase_env: "MAYFLY_CA_PASSPHRASE"
-  key_id: "mayfly-ca"
 "#;
         let err = Config::from_figment(figment_from_yaml(yaml)).expect_err("prefixed env");
         match err {
             ConfigError::Validation(msg) => {
-                assert!(msg.contains("ca.passphrase_env"));
+                assert!(msg.contains("passphrase_env"));
                 assert!(msg.contains("MAYFLY_"));
             }
             other => panic!("unexpected error: {other:?}"),
@@ -731,7 +869,7 @@ ca:
     }
 
     #[test]
-    fn blank_ca_key_id_is_rejected() {
+    fn blank_storage_directory_is_rejected() {
         let yaml = r#"
 server:
   tls:
@@ -740,13 +878,11 @@ github:
   client_id: "Iv1.test"
   client_secret: "shh"
 ca:
-  private_key_path: "./ca/ca_key"
-  passphrase_env: "CA_PASSPHRASE"
-  key_id: "   "
+  storage_directory: "   "
 "#;
-        let err = Config::from_figment(figment_from_yaml(yaml)).expect_err("blank key_id");
+        let err = Config::from_figment(figment_from_yaml(yaml)).expect_err("blank dir");
         match err {
-            ConfigError::Validation(msg) => assert!(msg.contains("ca.key_id")),
+            ConfigError::Validation(msg) => assert!(msg.contains("storage_directory")),
             other => panic!("unexpected error: {other:?}"),
         }
     }

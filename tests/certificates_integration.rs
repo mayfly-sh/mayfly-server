@@ -9,7 +9,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{TimeDelta, TimeZone, Utc};
-use mayfly_server::ca::CaService;
+use mayfly_server::ca::CaManager;
 use mayfly_server::clock::{Clock, TestClock};
 use mayfly_server::config::{AccessConfig, Config};
 use mayfly_server::db;
@@ -59,8 +59,14 @@ async fn state_for(github_base: &str, clock: Arc<TestClock>, access: AccessConfi
     ));
     let dyn_clock: Arc<dyn Clock> = clock.clone();
     let ca = Arc::new(
-        CaService::load(&ca_key_path(), CA_PASSPHRASE, "mayfly-ca", dyn_clock.clone())
-            .expect("load ca"),
+        CaManager::from_single_encrypted_file(
+            &ca_key_path(),
+            CA_PASSPHRASE,
+            "mayfly-ca",
+            dyn_clock.clone(),
+        )
+        .await
+        .expect("load ca"),
     );
 
     AppState::new(config, pool, dyn_clock)
@@ -142,6 +148,11 @@ async fn certificate_issuance_success() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["principal"], "vasugarg");
     assert_eq!(body["ttl_seconds"], 300);
+    // The response names which CA key signed the certificate.
+    assert_eq!(body["ca_key_id"], "mayfly-ca");
+    assert!(body["ca_fingerprint"]
+        .as_str()
+        .is_some_and(|fp| fp.starts_with("SHA256:")));
     assert!(body["certificate"]
         .as_str()
         .unwrap()

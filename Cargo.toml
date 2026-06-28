@@ -18,6 +18,10 @@ path = "src/main.rs"
 anyhow = "1"
 async-trait = "0.1.89"
 axum = { version = "0.8", features = ["http2"] }
+base64 = "0.22"
+# Raw Ed25519 signing/verification for the agent request-signing protocol.
+# Pure Rust (RustCrypto); same major version ssh-key already pulls in.
+ed25519-dalek = "2"
 chrono = { version = "0.4", default-features = false, features = [
     "clock",
     "serde",

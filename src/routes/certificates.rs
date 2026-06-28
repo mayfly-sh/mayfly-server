@@ -14,10 +14,10 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::audit::NewAuditEntry;
-use crate::authz::{AuthzDecision, AuthzError, Identity};
+use crate::authz::{AuthzDecision, AuthzError};
 use crate::ca::{CertificateRequest, CertificateResponse, CertificateValidation};
 use crate::errors::ApiError;
-use crate::routes::auth::BearerToken;
+use crate::routes::auth::{resolve_identity, BearerToken};
 use crate::state::AppState;
 
 /// Request body for `POST /api/v1/certificates/issue`.
@@ -51,31 +51,9 @@ pub async fn issue(
     let ca = state.ca().ok_or_else(|| {
         ApiError::internal(anyhow::anyhow!("certificate authority is not configured"))
     })?;
-    let github = state.github();
 
     // 1. Resolve identity from the GitHub token.
-    let user = github.get_user(&token).await?;
-
-    // Only fetch org/team membership when the configuration actually uses it,
-    // avoiding extra GitHub calls (and OAuth scopes) for user-only allowlists.
-    let access = &state.config().access;
-    let orgs = if access.allowed_orgs.is_empty() {
-        Vec::new()
-    } else {
-        fetch_or_empty(github.get_user_orgs(&token).await, "orgs")
-    };
-    let teams = if access.allowed_teams.is_empty() {
-        Vec::new()
-    } else {
-        fetch_or_empty(github.get_user_teams(&token).await, "teams")
-    };
-
-    let identity = Identity {
-        login: user.login.clone(),
-        github_id: user.id,
-        orgs,
-        teams,
-    };
+    let identity = resolve_identity(&state, &token).await?;
 
     // 2. Authorize (deny-by-default).
     if let AuthzDecision::Deny { reason } = state.authz().authorize(&identity) {
@@ -104,7 +82,7 @@ pub async fn issue(
         public_key: request.public_key,
         ttl_seconds: request.ttl_seconds,
     };
-    let response = ca.sign_certificate(&cert_request)?;
+    let response = ca.sign_certificate(&cert_request).await?;
 
     // 4. Audit the issuance (fail-closed).
     state
@@ -118,6 +96,8 @@ pub async fn issue(
                     "principal": response.principal,
                     "ttl_seconds": response.ttl_seconds,
                     "valid_before": response.valid_before,
+                    "ca_key_id": response.ca_key_id,
+                    "ca_fingerprint": response.ca_fingerprint,
                 })),
         )
         .await?;
@@ -138,25 +118,4 @@ pub async fn validate(
     })?;
     let validation = ca.verify_certificate(&request.certificate, state.clock().now())?;
     Ok(Json(validation))
-}
-
-/// Use a successful org/team lookup, or treat a failure as "no memberships".
-///
-/// Authorization is deny-by-default, so failing closed here is safe: an
-/// unresolved membership simply cannot grant access via an org/team rule.
-fn fetch_or_empty(
-    result: Result<Vec<String>, crate::github::GitHubError>,
-    what: &str,
-) -> Vec<String> {
-    match result {
-        Ok(values) => values,
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                membership = what,
-                "failed to resolve GitHub membership; treating as none for authorization",
-            );
-            Vec::new()
-        }
-    }
 }

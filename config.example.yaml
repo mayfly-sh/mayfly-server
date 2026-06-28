@@ -40,18 +40,55 @@ github:
   # device_base_url: "https://github.com"   # override for GitHub Enterprise
   # api_base_url: "https://api.github.com"
 
-# SSH certificate authority. The CA key must be an ENCRYPTED OpenSSH Ed25519
-# private key. The passphrase is read from the named environment variable at
-# startup (never stored in config). Generate a dev CA, e.g.:
-#   ssh-keygen -t ed25519 -f ./ca/ca_key -C mayfly-ca   # set a passphrase
-#   export CA_PASSPHRASE='your-passphrase'
-# Startup fails fast if the key is missing, undecryptable, or not Ed25519.
-# NOTE: passphrase_env must NOT start with `MAYFLY_` — that prefix is reserved
+# SSH certificate authority. Mayfly is a CA management server: it manages 1–64
+# CAs whose metadata lives in the database and whose ENCRYPTED OpenSSH Ed25519
+# private keys live on disk under `storage_directory`. CAs are NOT listed here —
+# they are created/imported through the admin API (POST /api/v1/admin/ca/...)
+# and loaded from storage at startup. The config describes storage only.
+#
+# Every CA key is encrypted at rest with a single STORAGE PASSPHRASE, read from
+# the named environment variable at startup (never stored in config):
+#   export CA_STORAGE_PASSPHRASE='a-strong-storage-passphrase'
+#
+# With `auto_load: true`, the server loads all stored CAs at startup and, when
+# storage is empty, bootstraps a first CA (key_id "mayfly-ca") so there is always
+# at least one enabled CA.
+#
+# Startup fails fast (closed) if: there are more than 64 CAs; any key id, public
+# key, or fingerprint is duplicated; a key is undecryptable or not Ed25519; or
+# CAs exist but none is enabled.
+#
+# `selection_strategy` chooses which enabled CA signs each certificate; only
+# `random` (a cryptographically secure choice) is implemented today.
+#
+# NOTE: `passphrase_env` must NOT start with `MAYFLY_` — that prefix is reserved
 # for config env vars and would be intercepted by the config loader.
 ca:
-  private_key_path: "./ca/ca_key"
-  passphrase_env: "CA_PASSPHRASE"
-  key_id: "mayfly-ca"
+  storage_directory: "./ca"
+  selection_strategy: random
+  auto_load: true
+  passphrase_env: "CA_STORAGE_PASSPHRASE"
+
+# Signed CA bundle distribution.
+#
+# Agents fetch the signed CA trust bundle from `GET /api/v1/agent/ca-bundle`.
+# The bundle is signed with a dedicated Ed25519 "Bundle Signing Key" (NOT an SSH
+# CA key) so agents can verify authenticity before trusting it. The key is read
+# from the environment variable named by `signing_key_env` (base64 32-byte
+# seed); if that is unset the server generates and persists one (0600) under the
+# CA `storage_directory`. Agents pin the key from the enrollment response.
+#
+# `sync_interval_seconds` is the base poll cadence handed to agents; each host
+# receives a value jittered by ±`jitter_percent` (CSPRNG) so the fleet does not
+# poll in lockstep. `ttl_seconds` is the signed bundle's validity window —
+# agents must reject expired bundles.
+#
+# NOTE: `signing_key_env` must NOT start with `MAYFLY_` (reserved prefix).
+bundle:
+  sync_interval_seconds: 300
+  jitter_percent: 10
+  ttl_seconds: 3600
+  signing_key_env: "BUNDLE_SIGNING_KEY"
 
 # Authorization allowlists (deny-by-default). A caller may obtain a certificate
 # only if their GitHub login is in allowed_users, OR one of their orgs is in

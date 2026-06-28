@@ -15,6 +15,7 @@ use axum::Json;
 use serde_json::json;
 
 use crate::audit::NewAuditEntry;
+use crate::authz::Identity;
 use crate::errors::ApiError;
 use crate::github::models::{DevicePollRequest, PollResponse, WhoamiResponse};
 use crate::github::DeviceTokenOutcome;
@@ -104,6 +105,55 @@ pub async fn whoami(
         .await?;
 
     Ok(Json(WhoamiResponse::from(user)))
+}
+
+/// Resolve a GitHub Bearer token into an authorization [`Identity`].
+///
+/// Fetches org/team membership only when the access policy references them,
+/// avoiding extra GitHub calls (and OAuth scopes) for user-only allowlists.
+/// Membership-lookup failures fail closed (treated as no memberships), which is
+/// safe because authorization is deny-by-default. Shared by certificate
+/// issuance and the admin API so both resolve identity identically.
+pub async fn resolve_identity(state: &AppState, token: &str) -> Result<Identity, ApiError> {
+    let github = state.github();
+    let user = github.get_user(token).await?;
+
+    let access = &state.config().access;
+    let orgs = if access.allowed_orgs.is_empty() {
+        Vec::new()
+    } else {
+        fetch_or_empty(github.get_user_orgs(token).await, "orgs")
+    };
+    let teams = if access.allowed_teams.is_empty() {
+        Vec::new()
+    } else {
+        fetch_or_empty(github.get_user_teams(token).await, "teams")
+    };
+
+    Ok(Identity {
+        login: user.login,
+        github_id: user.id,
+        orgs,
+        teams,
+    })
+}
+
+/// Use a successful org/team lookup, or treat a failure as "no memberships".
+fn fetch_or_empty(
+    result: Result<Vec<String>, crate::github::GitHubError>,
+    what: &str,
+) -> Vec<String> {
+    match result {
+        Ok(values) => values,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                membership = what,
+                "failed to resolve GitHub membership; treating as none for authorization",
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// Extractor for an `Authorization: Bearer <token>` header.

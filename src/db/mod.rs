@@ -6,6 +6,26 @@ use std::str::FromStr;
 /// SQL migration that creates the tamper-evident audit log table.
 pub const AUDIT_LOG_MIGRATION: &str = include_str!("migrations/001_audit_log.sql");
 
+/// SQL migration that creates the `machines` and `machine_enrollment_tokens`
+/// tables backing machine enrollment.
+pub const MACHINES_MIGRATION: &str = include_str!("migrations/002_machines.sql");
+
+/// SQL migration adding heartbeat-maintained liveness fields (`ip`,
+/// `current_generation`) to `machines`.
+pub const MACHINE_PROTOCOL_MIGRATION: &str = include_str!("migrations/003_machine_protocol.sql");
+
+/// SQL migration adding the CA bundle distribution tables (`ca_keys`,
+/// `ca_bundle_state`) and per-machine CA-sync acknowledgement columns.
+pub const CA_BUNDLE_MIGRATION: &str = include_str!("migrations/004_ca_bundle.sql");
+
+/// SQL migration adding the CA management tables (`ca_authorities`,
+/// `ca_manager_state`) that back the multi-key CA manager.
+pub const CA_MANAGEMENT_MIGRATION: &str = include_str!("migrations/005_ca_management.sql");
+
+/// SQL migration adding CA retirement-safety columns to `ca_authorities`
+/// (`disabled_generation`, `retired`, `retired_at`).
+pub const CA_RETIREMENT_MIGRATION: &str = include_str!("migrations/006_ca_retirement.sql");
+
 /// Connect to SQLite and apply audit schema migrations.
 ///
 /// Uses an in-memory database when `database_url` is `:memory:`.
@@ -42,7 +62,72 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .map_err(|err| {
             sqlx::Error::Protocol(format!("failed to apply audit_log schema migration: {err}"))
         })?;
+
+    sqlx::raw_sql(MACHINES_MIGRATION)
+        .execute(pool)
+        .await
+        .map_err(|err| {
+            sqlx::Error::Protocol(format!("failed to apply machines schema migration: {err}"))
+        })?;
+
+    // `ALTER TABLE ADD COLUMN` is not idempotent, so apply the protocol
+    // migration only when its columns are not already present.
+    if !column_exists(pool, "machines", "ip").await? {
+        sqlx::raw_sql(MACHINE_PROTOCOL_MIGRATION)
+            .execute(pool)
+            .await
+            .map_err(|err| {
+                sqlx::Error::Protocol(format!(
+                    "failed to apply machine protocol schema migration: {err}"
+                ))
+            })?;
+    }
+
+    // Likewise gate the CA bundle migration on its `machines` columns; the
+    // table creates within it all use `IF NOT EXISTS`, so the only
+    // non-idempotent statements are the `ALTER TABLE`s.
+    if !column_exists(pool, "machines", "synced_generation").await? {
+        sqlx::raw_sql(CA_BUNDLE_MIGRATION)
+            .execute(pool)
+            .await
+            .map_err(|err| {
+                sqlx::Error::Protocol(format!("failed to apply CA bundle schema migration: {err}"))
+            })?;
+    }
+
+    // The CA management migration is fully idempotent (every statement uses
+    // IF NOT EXISTS), so it can run unconditionally on every startup.
+    sqlx::raw_sql(CA_MANAGEMENT_MIGRATION)
+        .execute(pool)
+        .await
+        .map_err(|err| {
+            sqlx::Error::Protocol(format!("failed to apply CA management schema migration: {err}"))
+        })?;
+
+    // The retirement migration uses non-idempotent `ALTER TABLE ADD COLUMN`, so
+    // gate it on the absence of its `retired` column.
+    if !column_exists(pool, "ca_authorities", "retired").await? {
+        sqlx::raw_sql(CA_RETIREMENT_MIGRATION)
+            .execute(pool)
+            .await
+            .map_err(|err| {
+                sqlx::Error::Protocol(format!(
+                    "failed to apply CA retirement schema migration: {err}"
+                ))
+            })?;
+    }
     Ok(())
+}
+
+/// Whether a column exists on a table.
+async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<bool, sqlx::Error> {
+    let count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?")
+            .bind(table)
+            .bind(column)
+            .fetch_one(pool)
+            .await?;
+    Ok(count.0 > 0)
 }
 
 /// Drop a pre-existing `audit_log` table whose schema predates the current
@@ -118,6 +203,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migrate_creates_machine_tables() {
+        let pool = connect(":memory:").await.expect("connect");
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'table' AND name IN ('machines', 'machine_enrollment_tokens')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("tables exist");
+        assert_eq!(row.0, 2);
+    }
+
+    #[tokio::test]
     async fn migrate_creates_append_only_triggers() {
         let pool = connect(":memory:").await.expect("connect");
         let row: (i64,) = sqlx::query_as(
@@ -188,6 +286,54 @@ mod tests {
 
         let err = migrate(&pool).await.expect_err("must refuse to drop data");
         assert!(err.to_string().contains("incompatible legacy schema"));
+    }
+
+    #[tokio::test]
+    async fn migrate_creates_ca_bundle_tables_and_columns() {
+        let pool = connect(":memory:").await.expect("connect");
+        let tables: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'table' AND name IN ('ca_keys', 'ca_bundle_state')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("tables exist");
+        assert_eq!(tables.0, 2);
+
+        let cols: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM pragma_table_info('machines') \
+             WHERE name IN ('synced_generation', 'bundle_fingerprint', 'last_sync')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("columns");
+        assert_eq!(cols.0, 3);
+    }
+
+    #[tokio::test]
+    async fn migrate_creates_ca_management_tables() {
+        let pool = connect(":memory:").await.expect("connect");
+        let tables: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'table' AND name IN ('ca_authorities', 'ca_manager_state')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("tables exist");
+        assert_eq!(tables.0, 2);
+    }
+
+    #[tokio::test]
+    async fn migrate_adds_ca_retirement_columns() {
+        let pool = connect(":memory:").await.expect("connect");
+        let cols: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM pragma_table_info('ca_authorities') \
+             WHERE name IN ('disabled_generation', 'retired', 'retired_at')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("columns");
+        assert_eq!(cols.0, 3);
     }
 
     #[tokio::test]
