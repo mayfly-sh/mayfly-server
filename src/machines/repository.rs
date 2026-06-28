@@ -506,7 +506,10 @@ mod tests {
             ip: Some("10.0.0.5"),
             current_generation: 42,
         };
-        assert!(repo.update_last_seen(&mut c, &update).await.expect("update"));
+        assert!(repo
+            .update_last_seen(&mut c, &update)
+            .await
+            .expect("update"));
 
         let machine = repo
             .find_by_id(&mut c, "srv_01")
@@ -532,7 +535,10 @@ mod tests {
             ip: None,
             current_generation: 1,
         };
-        assert!(!repo.update_last_seen(&mut c, &update).await.expect("update"));
+        assert!(!repo
+            .update_last_seen(&mut c, &update)
+            .await
+            .expect("update"));
     }
 
     #[tokio::test]

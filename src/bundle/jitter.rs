@@ -42,8 +42,8 @@ pub fn with_jitter(base_seconds: u32, percent: u8, rng: &dyn RandomSource) -> u3
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use std::sync::Arc;
+    use std::sync::Mutex;
 
     /// Deterministic RNG returning a fixed index (clamped to bound).
     struct FixedRng(usize);

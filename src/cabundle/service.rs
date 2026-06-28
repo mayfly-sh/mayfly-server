@@ -101,7 +101,13 @@ impl<R: CaKeyRepository> CaBundleService<R> {
             .map_err(|e| AckError::Bundle(CaBundleError::Database(e)))?;
         let updated = self
             .keys
-            .record_ack(&mut conn, machine_id, bundle.generation, &bundle.fingerprint, now)
+            .record_ack(
+                &mut conn,
+                machine_id,
+                bundle.generation,
+                &bundle.fingerprint,
+                now,
+            )
             .await
             .map_err(|e| AckError::Bundle(CaBundleError::Database(e)))?;
         if !updated {
@@ -221,7 +227,9 @@ mod tests {
             status: "success".to_string(),
         };
         assert!(matches!(
-            svc.record_ack("srv_missing", &ack, at(1)).await.unwrap_err(),
+            svc.record_ack("srv_missing", &ack, at(1))
+                .await
+                .unwrap_err(),
             AckError::UnknownMachine
         ));
     }

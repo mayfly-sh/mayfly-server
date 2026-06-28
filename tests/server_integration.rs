@@ -128,7 +128,10 @@ async fn end_to_end_https_health_over_tls() {
 
     let tcp = TcpStream::connect(local_addr).await.expect("connect");
     let server_name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
-    let mut tls_stream = connector.connect(server_name, tcp).await.expect("tls handshake");
+    let mut tls_stream = connector
+        .connect(server_name, tcp)
+        .await
+        .expect("tls handshake");
 
     let request = "GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     tls_stream

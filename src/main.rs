@@ -38,14 +38,12 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // 3. Database + migrations.
-    let pool = db::connect(&config.database.url)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to connect to or migrate the database at '{}'",
-                config.database.url
-            )
-        })?;
+    let pool = db::connect(&config.database.url).await.with_context(|| {
+        format!(
+            "failed to connect to or migrate the database at '{}'",
+            config.database.url
+        )
+    })?;
     tracing::info!(url = %config.database.url, "database connected and migrated");
 
     // 4. GitHub client (validated config guarantees credentials are present).
@@ -80,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|err| anyhow::anyhow!("failed to load the bundle signing key: {err}"))?,
     );
     tracing::info!(
-        signing_public_key = %bundle_signer.public_key_b64(),
+        bundle_signing_public_key = %bundle_signer.public_key_openssh(),
         "bundle signing key ready",
     );
 

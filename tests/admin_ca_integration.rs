@@ -59,9 +59,14 @@ async fn state_for(github_base: &str, access: AccessConfig) -> AppState {
     ));
     let dyn_clock: Arc<dyn Clock> = fixed_clock();
     let ca = Arc::new(
-        CaManager::from_single_encrypted_file(&ca_key_path(), CA_PASSPHRASE, "mayfly-ca", dyn_clock.clone())
-            .await
-            .expect("load ca"),
+        CaManager::from_single_encrypted_file(
+            &ca_key_path(),
+            CA_PASSPHRASE,
+            "mayfly-ca",
+            dyn_clock.clone(),
+        )
+        .await
+        .expect("load ca"),
     );
     AppState::new(config, pool, dyn_clock)
         .with_github(github)
@@ -127,15 +132,13 @@ fn patch(uri: &str, token: &str, body: Value) -> Request<Body> {
 }
 
 async fn audit_events(state: &AppState) -> Vec<String> {
-    sqlx::query_as::<_, (String,)>(
-        "SELECT event_type FROM audit_log ORDER BY chain_position ASC",
-    )
-    .fetch_all(state.db())
-    .await
-    .expect("audit query")
-    .into_iter()
-    .map(|r| r.0)
-    .collect()
+    sqlx::query_as::<_, (String,)>("SELECT event_type FROM audit_log ORDER BY chain_position ASC")
+        .fetch_all(state.db())
+        .await
+        .expect("audit query")
+        .into_iter()
+        .map(|r| r.0)
+        .collect()
 }
 
 #[tokio::test]
@@ -187,7 +190,11 @@ async fn generate_lists_gets_and_patches_a_ca() {
     // Disable it, then rename it, via PATCH.
     let (status, body) = call(
         &state,
-        patch(&format!("/api/v1/admin/ca/{id}"), "gho_token", json!({ "enabled": false })),
+        patch(
+            &format!("/api/v1/admin/ca/{id}"),
+            "gho_token",
+            json!({ "enabled": false }),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -195,7 +202,11 @@ async fn generate_lists_gets_and_patches_a_ca() {
 
     let (status, body) = call(
         &state,
-        patch(&format!("/api/v1/admin/ca/{id}"), "gho_token", json!({ "key_id": "ca-archived" })),
+        patch(
+            &format!("/api/v1/admin/ca/{id}"),
+            "gho_token",
+            json!({ "key_id": "ca-archived" }),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -284,7 +295,9 @@ async fn unauthorized_caller_is_forbidden() {
     assert_eq!(status, StatusCode::FORBIDDEN);
 
     // The denial was audited.
-    assert!(audit_events(&state).await.contains(&"ca.admin_denied".to_string()));
+    assert!(audit_events(&state)
+        .await
+        .contains(&"ca.admin_denied".to_string()));
 }
 
 #[tokio::test]

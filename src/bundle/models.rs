@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 
 /// The only bundle schema version this server produces and the only one agents
 /// must accept. Bump (and add a new canonicalization arm) for breaking changes.
-pub const BUNDLE_VERSION: &str = "v1";
+pub const BUNDLE_VERSION: u32 = 1;
 
 /// The signature algorithm used for the Bundle Signing Key. Ed25519 only.
-pub const SIGNATURE_ALGORITHM: &str = "ed25519";
+pub const SIGNATURE_ALGORITHM: &str = "ssh-ed25519";
 
 /// One enabled CA public key as published in a [`SignedBundle`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,8 +41,8 @@ pub struct BundleKey {
 /// against the pinned Bundle Signing Key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedBundle {
-    /// Schema version (`v1`). Agents MUST reject unknown versions.
-    pub bundle_version: String,
+    /// Schema version (`1`). Agents MUST reject unknown versions.
+    pub bundle_version: u32,
     /// Monotonic CA generation counter.
     pub generation: u32,
     /// RFC 3339 instant the bundle was signed.
@@ -53,14 +53,15 @@ pub struct SignedBundle {
     pub fingerprint: String,
     /// Enabled CA public keys, sorted by `key_id`.
     pub keys: Vec<BundleKey>,
-    /// Signature algorithm identifier (`ed25519`).
+    /// Signature algorithm identifier (`ssh-ed25519`).
     pub signature_algorithm: String,
     /// Base64 detached signature over the canonical representation.
     pub signature: String,
-    /// Base64 Ed25519 public key of the Bundle Signing Key, for convenience.
-    /// Agents MUST still pin this key out of band (delivered at enrollment) and
-    /// MUST NOT trust a bundle solely because it carries a self-consistent key.
-    pub signing_public_key: String,
+    /// OpenSSH-format Ed25519 public key of the Bundle Signing Key
+    /// (`ssh-ed25519 AAAA...`), for convenience. Agents MUST still pin this key
+    /// out of band (delivered at enrollment) and MUST NOT trust a bundle solely
+    /// because it carries a self-consistent key.
+    pub bundle_signing_public_key: String,
 }
 
 /// Errors from building, signing, or verifying a [`SignedBundle`].
@@ -245,5 +246,71 @@ mod tests {
         );
         assert!(AckOutcome::Applied.is_success());
         assert!(!AckOutcome::RolledBack.is_success());
+    }
+
+    /// Protocol: the serialized [`SignedBundle`] exposes the exact wire field
+    /// names and JSON types the agent's `CaBundleResponse` deserializes —
+    /// `bundle_version` as an integer, `signature_algorithm` as `ssh-ed25519`,
+    /// and the signing key under `bundle_signing_public_key` in OpenSSH form.
+    #[test]
+    fn signed_bundle_serializes_with_wire_field_names() {
+        let bundle = SignedBundle {
+            bundle_version: BUNDLE_VERSION,
+            generation: 42,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            expires_at: "2026-02-01T00:00:00Z".to_string(),
+            fingerprint: "sha256:ab".to_string(),
+            keys: vec![BundleKey {
+                key_id: "ca-01".to_string(),
+                public_key: "ssh-ed25519 AAAA".to_string(),
+                fingerprint: "SHA256:x".to_string(),
+            }],
+            signature_algorithm: SIGNATURE_ALGORITHM.to_string(),
+            signature: "c2ln".to_string(),
+            bundle_signing_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5".to_string(),
+        };
+        let value = serde_json::to_value(&bundle).expect("serialize");
+        assert_eq!(value["bundle_version"], 1);
+        assert!(value["bundle_version"].is_u64());
+        assert_eq!(value["signature_algorithm"], "ssh-ed25519");
+        assert_eq!(
+            value["bundle_signing_public_key"],
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5"
+        );
+        assert_eq!(value["keys"][0]["key_id"], "ca-01");
+        // The legacy field name must not be present.
+        assert!(value.get("signing_public_key").is_none());
+    }
+
+    /// Protocol: the server deserializes the agent's exact ack bytes (the bytes
+    /// asserted by the agent's `ack_report_serializes_to_server_schema` test)
+    /// without any aliases — applied omits `reason`, rollback carries it.
+    #[test]
+    fn deserializes_agent_ack_bytes() {
+        let applied: BundleAckRequest = serde_json::from_str(
+            "{\"generation\":42,\"fingerprint\":\"sha256:ab\",\"status\":\"applied\"}",
+        )
+        .expect("applied ack");
+        assert_eq!(applied.generation, 42);
+        assert_eq!(applied.fingerprint, "sha256:ab");
+        assert_eq!(
+            AckOutcome::parse(&applied.status),
+            Some(AckOutcome::Applied)
+        );
+        assert!(applied.reason.is_none());
+
+        let rollback: BundleAckRequest = serde_json::from_str(
+            "{\"generation\":42,\"fingerprint\":\"sha256:ab\",\"status\":\"rollback\",\
+\"reason\":\"sshd reload failed; previous bundle restored\"}",
+        )
+        .expect("rollback ack");
+        assert_eq!(
+            AckOutcome::parse(&rollback.status),
+            Some(AckOutcome::RolledBack)
+        );
+        assert_eq!(
+            rollback.reason.as_deref(),
+            Some("sshd reload failed; previous bundle restored")
+        );
     }
 }

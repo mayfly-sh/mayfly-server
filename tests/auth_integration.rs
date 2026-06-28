@@ -37,7 +37,10 @@ async fn state_for(github_base: &str) -> AppState {
 }
 
 async fn call(state: AppState, request: Request<Body>) -> (StatusCode, Value) {
-    let response = build_router(state).oneshot(request).await.expect("response");
+    let response = build_router(state)
+        .oneshot(request)
+        .await
+        .expect("response");
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -120,7 +123,10 @@ async fn device_poll_approved_returns_token_and_audits() {
 
     let state = state_for(&server.uri()).await;
     let audit_state = state.clone();
-    let req = post_json("/api/v1/auth/device/poll", json!({ "device_code": "dc-123" }));
+    let req = post_json(
+        "/api/v1/auth/device/poll",
+        json!({ "device_code": "dc-123" }),
+    );
 
     let (status, body) = call(state, req).await;
     assert_eq!(status, StatusCode::OK);
@@ -128,7 +134,10 @@ async fn device_poll_approved_returns_token_and_audits() {
     assert_eq!(body["access_token"], "gho_secret");
 
     let events = audit_events(&audit_state).await;
-    assert_eq!(events, vec![("auth.device_authorized".to_string(), "vasugarg".to_string())]);
+    assert_eq!(
+        events,
+        vec![("auth.device_authorized".to_string(), "vasugarg".to_string())]
+    );
 }
 
 #[tokio::test]
@@ -144,7 +153,10 @@ async fn device_poll_pending_is_not_audited() {
 
     let state = state_for(&server.uri()).await;
     let audit_state = state.clone();
-    let req = post_json("/api/v1/auth/device/poll", json!({ "device_code": "dc-123" }));
+    let req = post_json(
+        "/api/v1/auth/device/poll",
+        json!({ "device_code": "dc-123" }),
+    );
 
     let (status, body) = call(state, req).await;
     assert_eq!(status, StatusCode::OK);
@@ -165,7 +177,10 @@ async fn device_poll_denied_is_not_audited() {
 
     let state = state_for(&server.uri()).await;
     let audit_state = state.clone();
-    let req = post_json("/api/v1/auth/device/poll", json!({ "device_code": "dc-123" }));
+    let req = post_json(
+        "/api/v1/auth/device/poll",
+        json!({ "device_code": "dc-123" }),
+    );
 
     let (status, body) = call(state, req).await;
     assert_eq!(status, StatusCode::OK);
@@ -203,7 +218,10 @@ async fn whoami_returns_identity_and_audits() {
     assert_eq!(body["email"], "vasu@example.com");
 
     let events = audit_events(&audit_state).await;
-    assert_eq!(events, vec![("auth.identity_lookup".to_string(), "vasugarg".to_string())]);
+    assert_eq!(
+        events,
+        vec![("auth.identity_lookup".to_string(), "vasugarg".to_string())]
+    );
 }
 
 #[tokio::test]

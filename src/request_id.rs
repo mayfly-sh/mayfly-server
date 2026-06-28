@@ -260,8 +260,7 @@ mod tests {
                     field: &tracing::field::Field,
                     value: &dyn std::fmt::Debug,
                 ) {
-                    self.0
-                        .push_str(&format!("{}={:?};", field.name(), value));
+                    self.0.push_str(&format!("{}={:?};", field.name(), value));
                 }
             }
             let mut visitor = Visitor(String::new());

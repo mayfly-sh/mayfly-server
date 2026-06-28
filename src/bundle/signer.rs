@@ -19,6 +19,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey, SIGNATURE_LENGTH};
+use ssh_key::public::{Ed25519PublicKey, KeyData};
+use ssh_key::PublicKey;
 
 use crate::bundle::canonical::{canonical_message, CanonicalInput};
 use crate::bundle::models::{BundleError, SignedBundle, BUNDLE_VERSION, SIGNATURE_ALGORITHM};
@@ -34,7 +36,7 @@ pub trait BundleSigner: Send + Sync {
     /// The 32-byte Ed25519 public key of this signer.
     fn public_key_bytes(&self) -> [u8; KEY_LEN];
 
-    /// The signature algorithm identifier (`ed25519`).
+    /// The signature algorithm identifier (`ssh-ed25519`).
     fn algorithm(&self) -> &'static str {
         SIGNATURE_ALGORITHM
     }
@@ -42,6 +44,18 @@ pub trait BundleSigner: Send + Sync {
     /// Base64 of [`Self::public_key_bytes`].
     fn public_key_b64(&self) -> String {
         BASE64.encode(self.public_key_bytes())
+    }
+
+    /// The signer's public key as an OpenSSH line (`ssh-ed25519 AAAA...`).
+    ///
+    /// This is the wire/storage representation: it is what is published in the
+    /// signed bundle and the enrollment response, and what the agent parses,
+    /// pins, and stores.
+    fn public_key_openssh(&self) -> String {
+        let ed = Ed25519PublicKey(self.public_key_bytes());
+        PublicKey::from(KeyData::Ed25519(ed))
+            .to_openssh()
+            .unwrap_or_default()
     }
 
     /// Base64 signature of `message`.
@@ -121,10 +135,9 @@ impl Ed25519BundleSigner {
         let raw = BASE64
             .decode(value.as_bytes())
             .map_err(|_| BundleError::Malformed("bundle signing seed is not base64".to_string()))?;
-        let seed: [u8; KEY_LEN] = raw
-            .as_slice()
-            .try_into()
-            .map_err(|_| BundleError::Malformed("bundle signing seed must be 32 bytes".to_string()))?;
+        let seed: [u8; KEY_LEN] = raw.as_slice().try_into().map_err(|_| {
+            BundleError::Malformed("bundle signing seed must be 32 bytes".to_string())
+        })?;
         Ok(Self::from_seed(&seed))
     }
 }
@@ -157,7 +170,9 @@ pub fn verify_signed_bundle(
     now: DateTime<Utc>,
 ) -> Result<(), BundleError> {
     if bundle.bundle_version != BUNDLE_VERSION {
-        return Err(BundleError::UnsupportedVersion(bundle.bundle_version.clone()));
+        return Err(BundleError::UnsupportedVersion(
+            bundle.bundle_version.to_string(),
+        ));
     }
     if bundle.signature_algorithm != SIGNATURE_ALGORITHM {
         return Err(BundleError::UnsupportedAlgorithm(
@@ -165,12 +180,15 @@ pub fn verify_signed_bundle(
         ));
     }
 
-    // The bundle advertises its signer; require it to be the pinned key so a
-    // swapped-key bundle is rejected before any signature math.
-    let embedded = BASE64
-        .decode(bundle.signing_public_key.as_bytes())
-        .map_err(|_| BundleError::Malformed("signing_public_key is not base64".to_string()))?;
-    if embedded.as_slice() != pinned_signing_key.as_slice() {
+    // The bundle advertises its signer (OpenSSH format); require it to be the
+    // pinned key so a swapped-key bundle is rejected before any signature math.
+    let embedded = PublicKey::from_openssh(&bundle.bundle_signing_public_key).map_err(|_| {
+        BundleError::Malformed("bundle_signing_public_key is not an OpenSSH key".to_string())
+    })?;
+    let embedded_ed = embedded.key_data().ed25519().ok_or_else(|| {
+        BundleError::Malformed("bundle_signing_public_key is not ed25519".to_string())
+    })?;
+    if embedded_ed.0.as_slice() != pinned_signing_key.as_slice() {
         return Err(BundleError::UntrustedSigner);
     }
 
@@ -187,12 +205,11 @@ pub fn verify_signed_bundle(
     let signature = Signature::from_bytes(&sig_bytes);
 
     let message = canonical_message(&CanonicalInput {
-        bundle_version: &bundle.bundle_version,
+        bundle_version: bundle.bundle_version,
         generation: bundle.generation,
         created_at: &bundle.created_at,
         expires_at: &bundle.expires_at,
         fingerprint: &bundle.fingerprint,
-        algorithm: &bundle.signature_algorithm,
         keys: &bundle.keys,
     })?;
 
@@ -248,12 +265,11 @@ mod tests {
             created_at: &created_at,
             expires_at: &expires_at,
             fingerprint: &fingerprint,
-            algorithm: SIGNATURE_ALGORITHM,
             keys: &keys,
         })
         .unwrap();
         SignedBundle {
-            bundle_version: BUNDLE_VERSION.to_string(),
+            bundle_version: BUNDLE_VERSION,
             generation: 5,
             created_at,
             expires_at,
@@ -261,7 +277,7 @@ mod tests {
             keys,
             signature_algorithm: SIGNATURE_ALGORITHM.to_string(),
             signature: s.sign_b64(&message),
-            signing_public_key: s.public_key_b64(),
+            bundle_signing_public_key: s.public_key_openssh(),
         }
     }
 
@@ -318,7 +334,7 @@ mod tests {
         let attacker = Ed25519BundleSigner::from_seed(&[1u8; 32]);
         let honest = signer();
         let mut bundle = signed_bundle(&attacker, now());
-        bundle.signing_public_key = attacker.public_key_b64();
+        bundle.bundle_signing_public_key = attacker.public_key_openssh();
         assert!(matches!(
             verify_signed_bundle(&bundle, &honest.public_key_bytes(), now()),
             Err(BundleError::UntrustedSigner)
@@ -340,7 +356,7 @@ mod tests {
     fn unsupported_version_rejected() {
         let s = signer();
         let mut bundle = signed_bundle(&s, now());
-        bundle.bundle_version = "v2".to_string();
+        bundle.bundle_version = 2;
         assert!(matches!(
             verify_signed_bundle(&bundle, &s.public_key_bytes(), now()),
             Err(BundleError::UnsupportedVersion(_))

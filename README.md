@@ -148,7 +148,7 @@ Agents fetch the CA trust bundle from `GET /api/v1/agent/ca-bundle`. The respons
 
 ```json
 {
-  "bundle_version": "v1",
+  "bundle_version": 1,
   "generation": 42,
   "created_at": "2026-06-29T00:00:00Z",
   "expires_at": "2026-06-29T01:00:00Z",
@@ -156,10 +156,18 @@ Agents fetch the CA trust bundle from `GET /api/v1/agent/ca-bundle`. The respons
   "keys": [
     { "key_id": "ca-2026-q3", "public_key": "ssh-ed25519 AAAA...", "fingerprint": "SHA256:..." }
   ],
-  "signature_algorithm": "ed25519",
+  "signature_algorithm": "ssh-ed25519",
   "signature": "Base64(Ed25519 over the canonical representation)",
-  "signing_public_key": "Base64(32-byte Ed25519 public key)"
+  "bundle_signing_public_key": "ssh-ed25519 AAAA... (OpenSSH public key line)"
 }
+```
+
+The canonical representation that the signature covers is a single-line UTF-8
+JSON document with members in fixed (alphabetical) order and keys sorted by
+`key_id` (server and agent produce it byte-for-byte identically):
+
+```text
+{"bundle_version":1,"created_at":"<rfc3339>","expires_at":"<rfc3339>","fingerprint":"sha256:...","generation":42,"keys":[{"key_id":"ca-2026-q3","public_key":"ssh-ed25519 AAAA..."}]}
 ```
 
 - **Authenticity:** the signature is computed over a fixed, version-specific *canonical*

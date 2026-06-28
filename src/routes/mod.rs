@@ -31,8 +31,14 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route(&format!("{API_V1}/health"), get(health::health))
         .route(&format!("{API_V1}/ready"), get(ready::ready))
-        .route(&format!("{API_V1}/auth/device/start"), post(auth::device_start))
-        .route(&format!("{API_V1}/auth/device/poll"), post(auth::device_poll))
+        .route(
+            &format!("{API_V1}/auth/device/start"),
+            post(auth::device_start),
+        )
+        .route(
+            &format!("{API_V1}/auth/device/poll"),
+            post(auth::device_poll),
+        )
         .route(&format!("{API_V1}/auth/whoami"), get(auth::whoami))
         .route(
             &format!("{API_V1}/certificates/issue"),
@@ -50,10 +56,7 @@ pub fn build_router(state: AppState) -> Router {
             post(admin::generate),
         )
         .route(&format!("{API_V1}/admin/ca/import"), post(admin::import))
-        .route(
-            &format!("{API_V1}/admin/ca"),
-            get(admin::list),
-        )
+        .route(&format!("{API_V1}/admin/ca"), get(admin::list))
         .route(
             &format!("{API_V1}/admin/ca/{{id}}"),
             get(admin::get_one).patch(admin::patch),

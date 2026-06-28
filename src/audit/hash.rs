@@ -53,8 +53,9 @@ pub fn canonicalize(
         metadata,
     };
 
-    serde_json::to_string(&canonical)
-        .map_err(|err| AuditError::Serialization(format!("failed to serialize canonical entry: {err}")))
+    serde_json::to_string(&canonical).map_err(|err| {
+        AuditError::Serialization(format!("failed to serialize canonical entry: {err}"))
+    })
 }
 
 /// Compute the hex-encoded `entry_hash` for an entry.

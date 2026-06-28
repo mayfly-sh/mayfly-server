@@ -129,7 +129,10 @@ async fn lifecycle_persists_across_reload() {
         let manager = CaManager::from_config(&config, pool.clone(), clock())
             .await
             .expect("first boot");
-        manager.generate("ca-02", PASSPHRASE).await.expect("generate");
+        manager
+            .generate("ca-02", PASSPHRASE)
+            .await
+            .expect("generate");
         let imported = manager
             .import("ca-03", &imported_key, "import-pass")
             .await

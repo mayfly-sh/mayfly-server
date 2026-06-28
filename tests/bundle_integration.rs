@@ -17,7 +17,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{TimeDelta, TimeZone, Utc};
 use mayfly_server::agentauth::signing;
-use mayfly_server::bundle::{verify_signed_bundle, BundleSigner, Ed25519BundleSigner, SignedBundle};
+use mayfly_server::bundle::{
+    verify_signed_bundle, BundleSigner, Ed25519BundleSigner, SignedBundle,
+};
 use mayfly_server::ca::{CaManager, RandomSource};
 use mayfly_server::clock::{Clock, TestClock};
 use mayfly_server::config::Config;
@@ -107,9 +109,14 @@ async fn state(clock: Arc<TestClock>) -> AppState {
 
     let dyn_clock: Arc<dyn Clock> = clock;
     let ca = Arc::new(
-        CaManager::from_single_encrypted_file(&ca_key_path(), CA_PASSPHRASE, "mayfly-ca", dyn_clock.clone())
-            .await
-            .expect("load ca"),
+        CaManager::from_single_encrypted_file(
+            &ca_key_path(),
+            CA_PASSPHRASE,
+            "mayfly-ca",
+            dyn_clock.clone(),
+        )
+        .await
+        .expect("load ca"),
     );
     AppState::new(config, pool, dyn_clock)
         .with_ca(ca)
@@ -129,7 +136,10 @@ fn agent_key() -> (String, [u8; 32]) {
 }
 
 async fn call(state: AppState, request: Request<Body>) -> (StatusCode, Vec<u8>, Option<String>) {
-    let response = build_router(state).oneshot(request).await.expect("response");
+    let response = build_router(state)
+        .oneshot(request)
+        .await
+        .expect("response");
     let status = response.status();
     let etag = response
         .headers()
@@ -192,7 +202,8 @@ fn signed(
     extra: &[(&str, &str)],
 ) -> Request<Body> {
     let body_hash = signing::body_sha256_hex(body);
-    let canonical = signing::canonical_string(machine_id, timestamp, nonce, method, path, &body_hash);
+    let canonical =
+        signing::canonical_string(machine_id, timestamp, nonce, method, path, &body_hash);
     let signature = signing::sign_canonical(seed, &canonical);
     let mut builder = Request::builder()
         .method(method)
@@ -231,18 +242,24 @@ async fn signed_get_returns_signed_bundle_that_verifies() {
     assert_eq!(status, StatusCode::OK);
 
     let bundle: SignedBundle = serde_json::from_slice(&body).expect("signed bundle");
-    assert_eq!(bundle.bundle_version, "v1");
+    assert_eq!(bundle.bundle_version, 1);
     assert_eq!(bundle.generation, 1);
-    assert_eq!(bundle.signature_algorithm, "ed25519");
+    assert_eq!(bundle.signature_algorithm, "ssh-ed25519");
     assert_eq!(bundle.keys.len(), 1);
 
     // ETag is the quoted fingerprint.
-    assert_eq!(etag.as_deref(), Some(format!("\"{}\"", bundle.fingerprint).as_str()));
+    assert_eq!(
+        etag.as_deref(),
+        Some(format!("\"{}\"", bundle.fingerprint).as_str())
+    );
 
     // Verifies against the pinned signing key.
     let pinned = Ed25519BundleSigner::from_seed(&SIGNING_SEED);
     verify_signed_bundle(&bundle, &pinned.public_key_bytes(), clock.now()).expect("verify");
-    assert_eq!(bundle.signing_public_key, pinned.public_key_b64());
+    assert_eq!(
+        bundle.bundle_signing_public_key,
+        pinned.public_key_openssh()
+    );
 }
 
 #[tokio::test]
@@ -332,18 +349,28 @@ async fn ack_applied_updates_synced_generation_and_audits() {
     let fingerprint = state.ca().unwrap().bundle_fingerprint();
     let ack = json!({ "generation": 1, "fingerprint": fingerprint, "status": "applied" });
     let body = ack.to_string();
-    let req = signed("POST", ACK_PATH, body.as_bytes(), &machine_id, "a1", now, &seed, &[]);
+    let req = signed(
+        "POST",
+        ACK_PATH,
+        body.as_bytes(),
+        &machine_id,
+        "a1",
+        now,
+        &seed,
+        &[],
+    );
     let (status, resp, _) = call(state.clone(), req).await;
     assert_eq!(status, StatusCode::OK, "{}", json_body(&resp));
     assert_eq!(json_body(&resp)["status"], "recorded");
 
     // synced state persisted.
-    let row: (Option<i64>, Option<String>) =
-        sqlx::query_as("SELECT synced_generation, bundle_fingerprint FROM machines WHERE machine_id = ?")
-            .bind(&machine_id)
-            .fetch_one(state.db())
-            .await
-            .expect("row");
+    let row: (Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT synced_generation, bundle_fingerprint FROM machines WHERE machine_id = ?",
+    )
+    .bind(&machine_id)
+    .fetch_one(state.db())
+    .await
+    .expect("row");
     assert_eq!(row.0, Some(1));
     assert_eq!(row.1.as_deref(), Some(fingerprint.as_str()));
 
@@ -371,7 +398,16 @@ async fn ack_rollback_is_audited_without_advancing_sync() {
         "reason": "sshd reload failed"
     });
     let body = ack.to_string();
-    let req = signed("POST", ACK_PATH, body.as_bytes(), &machine_id, "r1", now, &seed, &[]);
+    let req = signed(
+        "POST",
+        ACK_PATH,
+        body.as_bytes(),
+        &machine_id,
+        "r1",
+        now,
+        &seed,
+        &[],
+    );
     let (status, _, _) = call(state.clone(), req).await;
     assert_eq!(status, StatusCode::OK);
 
@@ -402,7 +438,16 @@ async fn ack_unknown_status_is_bad_request() {
 
     let ack = json!({ "generation": 1, "fingerprint": "sha256:x", "status": "bogus" });
     let body = ack.to_string();
-    let req = signed("POST", ACK_PATH, body.as_bytes(), &machine_id, "b1", now, &seed, &[]);
+    let req = signed(
+        "POST",
+        ACK_PATH,
+        body.as_bytes(),
+        &machine_id,
+        "b1",
+        now,
+        &seed,
+        &[],
+    );
     let (status, _, _) = call(state.clone(), req).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
@@ -423,7 +468,16 @@ async fn bundle_status_reports_fleet_rollout() {
     let hb_body = hb.to_string();
     let (status, _, _) = call(
         state.clone(),
-        signed("POST", "/api/v1/agent/heartbeat", hb_body.as_bytes(), &machine_id, "h1", now, &seed, &[]),
+        signed(
+            "POST",
+            "/api/v1/agent/heartbeat",
+            hb_body.as_bytes(),
+            &machine_id,
+            "h1",
+            now,
+            &seed,
+            &[],
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -433,11 +487,24 @@ async fn bundle_status_reports_fleet_rollout() {
     let ack_body = ack.to_string();
     call(
         state.clone(),
-        signed("POST", ACK_PATH, ack_body.as_bytes(), &machine_id, "k1", now, &seed, &[]),
+        signed(
+            "POST",
+            ACK_PATH,
+            ack_body.as_bytes(),
+            &machine_id,
+            "k1",
+            now,
+            &seed,
+            &[],
+        ),
     )
     .await;
 
-    let (status, body, _) = call(state.clone(), bearer("GET", "/api/v1/admin/bundle/status", Value::Null)).await;
+    let (status, body, _) = call(
+        state.clone(),
+        bearer("GET", "/api/v1/admin/bundle/status", Value::Null),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let v = json_body(&body);
     assert_eq!(v["total_machines"], 1);
@@ -447,6 +514,103 @@ async fn bundle_status_reports_fleet_rollout() {
     assert_eq!(v["oldest_generation"], 1);
     assert_eq!(v["generations"][0]["generation"], 1);
     assert_eq!(v["generations"][0]["count"], 1);
+}
+
+/// Cross-protocol: the full server↔agent wire flow in one test.
+///
+/// Server generates a signed bundle → it is verified exactly as the agent would
+/// (pinned OpenSSH signing key, JSON canonical bytes, `verify_strict`) → an ACK
+/// is serialized in the agent's exact `AckReport` wire shape
+/// (`{"generation","fingerprint","status"}`) → the server accepts it without
+/// aliases → the applied generation is recorded → fleet rollout metrics update.
+#[tokio::test]
+async fn cross_protocol_bundle_verify_ack_record_and_metrics() {
+    let clock = fixed_clock();
+    let state = state(clock.clone()).await;
+    let (public, seed) = agent_key();
+    let machine_id = enroll(&state, &public, "pi-zero").await;
+    let now = clock.now().timestamp();
+
+    // 1) Server generates the signed bundle.
+    let req = signed("GET", BUNDLE_PATH, b"", &machine_id, "g1", now, &seed, &[]);
+    let (status, body, _) = call(state.clone(), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let bundle: SignedBundle = serde_json::from_slice(&body).expect("signed bundle");
+
+    // Wire shape the agent expects (C2/C3/C4/C5).
+    assert_eq!(bundle.bundle_version, 1);
+    assert_eq!(bundle.signature_algorithm, "ssh-ed25519");
+    assert!(bundle.bundle_signing_public_key.starts_with("ssh-ed25519 "));
+
+    // 2) Agent-equivalent verification against the pinned signing key.
+    let pinned = Ed25519BundleSigner::from_seed(&SIGNING_SEED);
+    verify_signed_bundle(&bundle, &pinned.public_key_bytes(), clock.now()).expect("verify");
+
+    // Heartbeat so the machine is ONLINE and counts toward rollout.
+    let hb = json!({
+        "agent_version": "0.1.0", "hostname": "pi-zero", "os": "linux",
+        "kernel": "6.12", "ip": "10.0.0.5", "current_generation": bundle.generation, "uptime_seconds": 10
+    });
+    let hb_body = hb.to_string();
+    let (status, _, _) = call(
+        state.clone(),
+        signed(
+            "POST",
+            "/api/v1/agent/heartbeat",
+            hb_body.as_bytes(),
+            &machine_id,
+            "h1",
+            now,
+            &seed,
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 3) ACK serialized exactly as the agent's `AckReport` does on success.
+    let ack_body = format!(
+        "{{\"generation\":{},\"fingerprint\":\"{}\",\"status\":\"applied\"}}",
+        bundle.generation, bundle.fingerprint
+    );
+    let req = signed(
+        "POST",
+        ACK_PATH,
+        ack_body.as_bytes(),
+        &machine_id,
+        "a1",
+        now,
+        &seed,
+        &[],
+    );
+    // 4) Server accepts it without aliases.
+    let (status, resp, _) = call(state.clone(), req).await;
+    assert_eq!(status, StatusCode::OK, "{}", json_body(&resp));
+    assert_eq!(json_body(&resp)["status"], "recorded");
+
+    // 5) Generation recorded.
+    let row: (Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT synced_generation, bundle_fingerprint FROM machines WHERE machine_id = ?",
+    )
+    .bind(&machine_id)
+    .fetch_one(state.db())
+    .await
+    .expect("row");
+    assert_eq!(row.0, Some(i64::from(bundle.generation)));
+    assert_eq!(row.1.as_deref(), Some(bundle.fingerprint.as_str()));
+
+    // 6) Fleet metrics reflect the rollout.
+    let (status, body, _) = call(
+        state.clone(),
+        bearer("GET", "/api/v1/admin/bundle/status", Value::Null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = json_body(&body);
+    assert_eq!(v["total_machines"], 1);
+    assert_eq!(v["online"], 1);
+    assert_eq!(v["latest_generation"], bundle.generation);
+    assert_eq!(v["rollout_percentage"], 100.0);
 }
 
 #[tokio::test]
@@ -466,7 +630,11 @@ async fn retirement_blocked_then_forced() {
     // Assessment says unsafe.
     let (status, body, _) = call(
         state.clone(),
-        bearer("GET", &format!("/api/v1/admin/ca/{}/retirement", second.id), Value::Null),
+        bearer(
+            "GET",
+            &format!("/api/v1/admin/ca/{}/retirement", second.id),
+            Value::Null,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -476,7 +644,11 @@ async fn retirement_blocked_then_forced() {
     // Retire without force => 409 + denial audit.
     let (status, _, _) = call(
         state.clone(),
-        bearer("POST", &format!("/api/v1/admin/ca/{}/retire", second.id), json!({})),
+        bearer(
+            "POST",
+            &format!("/api/v1/admin/ca/{}/retire", second.id),
+            json!({}),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -493,7 +665,11 @@ async fn retirement_blocked_then_forced() {
     // Force => 200, forced + retired audits, and the key is gone.
     let (status, _, _) = call(
         state.clone(),
-        bearer("POST", &format!("/api/v1/admin/ca/{}/retire", second.id), json!({ "force": true })),
+        bearer(
+            "POST",
+            &format!("/api/v1/admin/ca/{}/retire", second.id),
+            json!({ "force": true }),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -521,7 +697,11 @@ async fn safe_retirement_succeeds_without_force() {
 
     let (status, body, _) = call(
         state.clone(),
-        bearer("GET", &format!("/api/v1/admin/ca/{}/retirement", second.id), Value::Null),
+        bearer(
+            "GET",
+            &format!("/api/v1/admin/ca/{}/retirement", second.id),
+            Value::Null,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -529,7 +709,11 @@ async fn safe_retirement_succeeds_without_force() {
 
     let (status, _, _) = call(
         state.clone(),
-        bearer("POST", &format!("/api/v1/admin/ca/{}/retire", second.id), json!({})),
+        bearer(
+            "POST",
+            &format!("/api/v1/admin/ca/{}/retire", second.id),
+            json!({}),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -546,7 +730,11 @@ async fn retiring_enabled_ca_is_conflict() {
     // Enabled CA: assessment unsafe; force still refused by the manager.
     let (status, _, _) = call(
         state.clone(),
-        bearer("POST", &format!("/api/v1/admin/ca/{}/retire", second.id), json!({ "force": true })),
+        bearer(
+            "POST",
+            &format!("/api/v1/admin/ca/{}/retire", second.id),
+            json!({ "force": true }),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);

@@ -103,7 +103,10 @@ mod tests {
     fn denied_org_is_rejected() {
         let svc = AuthzService::new(access(&[], &["acme"], &[]));
         let identity = Identity::new("vasugarg", 1).with_orgs(vec!["other".to_string()]);
-        assert!(matches!(svc.authorize(&identity), AuthzDecision::Deny { .. }));
+        assert!(matches!(
+            svc.authorize(&identity),
+            AuthzDecision::Deny { .. }
+        ));
     }
 
     #[test]
@@ -117,7 +120,10 @@ mod tests {
     fn denied_team_is_rejected() {
         let svc = AuthzService::new(access(&[], &[], &["acme/platform"]));
         let identity = Identity::new("vasugarg", 1).with_teams(vec!["acme/interns".to_string()]);
-        assert!(matches!(svc.authorize(&identity), AuthzDecision::Deny { .. }));
+        assert!(matches!(
+            svc.authorize(&identity),
+            AuthzDecision::Deny { .. }
+        ));
     }
 
     #[test]
@@ -126,6 +132,9 @@ mod tests {
         let identity = Identity::new("vasugarg", 1)
             .with_orgs(vec!["acme".to_string()])
             .with_teams(vec!["acme/platform".to_string()]);
-        assert!(matches!(svc.authorize(&identity), AuthzDecision::Deny { .. }));
+        assert!(matches!(
+            svc.authorize(&identity),
+            AuthzDecision::Deny { .. }
+        ));
     }
 }

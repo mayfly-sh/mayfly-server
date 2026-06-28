@@ -102,10 +102,10 @@ impl CaKey {
 
     /// Encrypt this key to an OpenSSH-armored string for storage at rest.
     pub fn to_encrypted_openssh(&self, passphrase: &str, key_id: &str) -> Result<String, CaError> {
-        let encrypted =
-            self.private_key
-                .encrypt(&mut OsRng, passphrase)
-                .map_err(|err| CaError::Sign(format!("failed to encrypt ca key '{key_id}': {err}")))?;
+        let encrypted = self
+            .private_key
+            .encrypt(&mut OsRng, passphrase)
+            .map_err(|err| CaError::Sign(format!("failed to encrypt ca key '{key_id}': {err}")))?;
         encrypted
             .to_openssh(LineEnding::LF)
             .map(|z| z.to_string())
@@ -304,7 +304,9 @@ mod tests {
     #[test]
     fn signs_with_expected_fields_and_ca_identity() {
         let key = ed25519_signer("ca-01");
-        let response = key.sign_certificate(&request(300), now(), "ca-01").expect("sign");
+        let response = key
+            .sign_certificate(&request(300), now(), "ca-01")
+            .expect("sign");
         assert_eq!(response.principal, "vasugarg");
         assert_eq!(response.ttl_seconds, 300);
         assert_eq!(response.ca_key_id, "ca-01");
@@ -343,7 +345,9 @@ mod tests {
     #[test]
     fn default_ttl_applied_for_zero() {
         let key = ed25519_signer("ca-01");
-        let response = key.sign_certificate(&request(0), now(), "ca-01").expect("sign");
+        let response = key
+            .sign_certificate(&request(0), now(), "ca-01")
+            .expect("sign");
         assert_eq!(response.ttl_seconds, DEFAULT_TTL_SECONDS);
     }
 
@@ -362,7 +366,9 @@ mod tests {
     fn foreign_certificate_is_not_signed_by_this_key() {
         let key = ed25519_signer("ca-01");
         let other = ed25519_signer("ca-02");
-        let response = other.sign_certificate(&request(300), now(), "ca-02").expect("sign");
+        let response = other
+            .sign_certificate(&request(300), now(), "ca-02")
+            .expect("sign");
         let cert = Certificate::from_openssh(&response.certificate).expect("parse");
         assert!(!key.signed(&cert));
         assert!(other.signed(&cert));

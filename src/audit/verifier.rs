@@ -128,7 +128,9 @@ mod tests {
         let chain = build_chain(3);
         assert!(matches!(
             verify_chain(&chain),
-            AuditVerificationResult::Valid { entries_verified: 3 }
+            AuditVerificationResult::Valid {
+                entries_verified: 3
+            }
         ));
     }
 
@@ -136,7 +138,9 @@ mod tests {
     fn empty_chain_is_valid() {
         assert!(matches!(
             verify_chain(&[]),
-            AuditVerificationResult::Valid { entries_verified: 0 }
+            AuditVerificationResult::Valid {
+                entries_verified: 0
+            }
         ));
     }
 

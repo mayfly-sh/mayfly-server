@@ -8,9 +8,7 @@
 //! [`crate::request_id`]) are included in every event emitted within that
 //! span, providing request correlation across the log stream.
 
-use tracing_subscriber::{
-    fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
-};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 use crate::config::{LogFormat, LoggingConfig};
 
@@ -55,7 +53,8 @@ fn build_filter(level: &str) -> Result<EnvFilter, LoggingError> {
         _ => level.to_string(),
     };
 
-    EnvFilter::try_new(&directive).map_err(|err| LoggingError::Filter(format!("{directive}: {err}")))
+    EnvFilter::try_new(&directive)
+        .map_err(|err| LoggingError::Filter(format!("{directive}: {err}")))
 }
 
 #[cfg(test)]

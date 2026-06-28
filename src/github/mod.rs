@@ -11,6 +11,6 @@ pub mod models;
 pub use client::{GitHubClient, RealGitHubClient, UnconfiguredGitHubClient};
 pub use errors::GitHubError;
 pub use models::{
-    DeviceAuthorization, DeviceTokenOutcome, DevicePollRequest, GitHubUser, PollResponse,
+    DeviceAuthorization, DevicePollRequest, DeviceTokenOutcome, GitHubUser, PollResponse,
     WhoamiResponse,
 };

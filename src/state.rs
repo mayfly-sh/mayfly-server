@@ -220,7 +220,9 @@ mod tests {
         let clock = Arc::new(TestClock::at_rfc3339("2026-06-24T12:00:00Z").unwrap());
         let state = test_state(clock).await;
         assert_eq!(
-            state.started_at().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            state
+                .started_at()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "2026-06-24T12:00:00Z"
         );
     }

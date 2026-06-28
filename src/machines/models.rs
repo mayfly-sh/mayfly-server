@@ -208,9 +208,10 @@ pub struct EnrollResponse {
     pub sync_interval: u32,
     /// The server's identity (its CA public key, OpenSSH Ed25519).
     pub server_identity: String,
-    /// Base64 Ed25519 public key of the server's Bundle Signing Key. The agent
-    /// pins this at enrollment and uses it to verify every signed CA bundle.
-    /// `None` only if the server has no signing key configured.
+    /// OpenSSH-format Ed25519 public key (`ssh-ed25519 AAAA...`) of the server's
+    /// Bundle Signing Key. The agent pins this at enrollment and uses it to
+    /// verify every signed CA bundle. `None` only if the server has no signing
+    /// key configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_signing_key: Option<String>,
 }
@@ -259,13 +260,16 @@ mod tests {
             heartbeat_interval: 60,
             sync_interval: 300,
             server_identity: "ssh-ed25519 AAAA".to_string(),
-            bundle_signing_key: Some("YmFzZTY0a2V5".to_string()),
+            bundle_signing_key: Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5".to_string()),
         };
         let value = serde_json::to_value(&response).expect("serialize");
         assert_eq!(value["machine_id"], "srv_abc");
         assert_eq!(value["heartbeat_interval"], 60);
         assert_eq!(value["sync_interval"], 300);
         assert_eq!(value["server_identity"], "ssh-ed25519 AAAA");
-        assert_eq!(value["bundle_signing_key"], "YmFzZTY0a2V5");
+        assert_eq!(
+            value["bundle_signing_key"],
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5"
+        );
     }
 }

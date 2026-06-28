@@ -91,10 +91,15 @@ mod tests {
     #[tokio::test]
     async fn append_stamps_recorded_at_from_clock() {
         let (service, clock) = test_service().await;
-        let entry = service.append_audit_event(event("01")).await.expect("append");
+        let entry = service
+            .append_audit_event(event("01"))
+            .await
+            .expect("append");
 
         assert_eq!(
-            entry.recorded_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+            entry
+                .recorded_at
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
             clock.now().to_rfc3339_opts(SecondsFormat::Millis, true)
         );
         assert_eq!(entry.chain_position, 1);
@@ -105,8 +110,14 @@ mod tests {
         let (service, _clock) = test_service().await;
         assert!(service.get_tip().await.expect("tip").is_none());
 
-        service.append_audit_event(event("01")).await.expect("first");
-        let second = service.append_audit_event(event("02")).await.expect("second");
+        service
+            .append_audit_event(event("01"))
+            .await
+            .expect("first");
+        let second = service
+            .append_audit_event(event("02"))
+            .await
+            .expect("second");
 
         let tip = service.get_tip().await.expect("tip").expect("some");
         assert_eq!(tip.chain_position, 2);
@@ -116,8 +127,14 @@ mod tests {
     #[tokio::test]
     async fn verify_chain_reports_valid_then_broken() {
         let (service, _clock) = test_service().await;
-        service.append_audit_event(event("01")).await.expect("first");
-        service.append_audit_event(event("02")).await.expect("second");
+        service
+            .append_audit_event(event("01"))
+            .await
+            .expect("first");
+        service
+            .append_audit_event(event("02"))
+            .await
+            .expect("second");
 
         assert!(service.verify_chain().await.expect("verify").is_valid());
 

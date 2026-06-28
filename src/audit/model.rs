@@ -155,7 +155,10 @@ mod tests {
 
     #[test]
     fn verification_result_is_valid_helper() {
-        assert!(AuditVerificationResult::Valid { entries_verified: 3 }.is_valid());
+        assert!(AuditVerificationResult::Valid {
+            entries_verified: 3
+        }
+        .is_valid());
         assert!(!AuditVerificationResult::Broken {
             position: 2,
             reason: "x".into()

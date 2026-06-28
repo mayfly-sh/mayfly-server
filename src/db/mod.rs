@@ -101,7 +101,9 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await
         .map_err(|err| {
-            sqlx::Error::Protocol(format!("failed to apply CA management schema migration: {err}"))
+            sqlx::Error::Protocol(format!(
+                "failed to apply CA management schema migration: {err}"
+            ))
         })?;
 
     // The retirement migration uses non-idempotent `ALTER TABLE ADD COLUMN`, so
@@ -121,12 +123,11 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
 /// Whether a column exists on a table.
 async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<bool, sqlx::Error> {
-    let count: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?")
-            .bind(table)
-            .bind(column)
-            .fetch_one(pool)
-            .await?;
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?")
+        .bind(table)
+        .bind(column)
+        .fetch_one(pool)
+        .await?;
     Ok(count.0 > 0)
 }
 
@@ -195,10 +196,11 @@ mod tests {
     #[tokio::test]
     async fn migrate_creates_audit_log_table() {
         let pool = connect(":memory:").await.expect("connect");
-        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE name = 'audit_log'")
-            .fetch_one(&pool)
-            .await
-            .expect("table exists");
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE name = 'audit_log'")
+                .fetch_one(&pool)
+                .await
+                .expect("table exists");
         assert_eq!(row.0, 1);
     }
 
@@ -260,7 +262,9 @@ mod tests {
         .await
         .expect("create legacy table");
 
-        migrate(&pool).await.expect("migrate reconciles legacy table");
+        migrate(&pool)
+            .await
+            .expect("migrate reconciles legacy table");
 
         // The current generic columns now exist.
         let cols: (i64,) = sqlx::query_as(

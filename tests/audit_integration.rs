@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
-use mayfly_server::audit::{AuditService, AuditVerificationResult, NewAuditEntry, GENESIS_PREVIOUS_HASH};
+use mayfly_server::audit::{
+    AuditService, AuditVerificationResult, NewAuditEntry, GENESIS_PREVIOUS_HASH,
+};
 use mayfly_server::clock::TestClock;
 use mayfly_server::db;
 use serde_json::json;
@@ -26,8 +28,14 @@ fn event(suffix: &str) -> NewAuditEntry {
 async fn append_verify_and_tip_end_to_end() {
     let service = service().await;
 
-    let first = service.append_audit_event(event("01")).await.expect("first");
-    let second = service.append_audit_event(event("02")).await.expect("second");
+    let first = service
+        .append_audit_event(event("01"))
+        .await
+        .expect("first");
+    let second = service
+        .append_audit_event(event("02"))
+        .await
+        .expect("second");
 
     assert_eq!(first.chain_position, 1);
     assert_eq!(first.previous_hash, GENESIS_PREVIOUS_HASH);
@@ -36,7 +44,9 @@ async fn append_verify_and_tip_end_to_end() {
     let result = service.verify_chain().await.expect("verify");
     assert!(matches!(
         result,
-        AuditVerificationResult::Valid { entries_verified: 2 }
+        AuditVerificationResult::Valid {
+            entries_verified: 2
+        }
     ));
 
     let tip = service.get_tip().await.expect("tip").expect("some");
@@ -60,8 +70,6 @@ async fn append_only_is_enforced_by_storage() {
         .await;
     assert!(update.is_err(), "updates must be rejected");
 
-    let delete = sqlx::query("DELETE FROM audit_log")
-        .execute(&pool)
-        .await;
+    let delete = sqlx::query("DELETE FROM audit_log").execute(&pool).await;
     assert!(delete.is_err(), "deletes must be rejected");
 }

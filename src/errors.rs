@@ -179,11 +179,31 @@ mod tests {
     #[tokio::test]
     async fn maps_variants_to_expected_status_and_code() {
         let cases = [
-            (ApiError::BadRequest("x".into()), StatusCode::BAD_REQUEST, "bad_request"),
-            (ApiError::Unauthorized("x".into()), StatusCode::UNAUTHORIZED, "unauthorized"),
-            (ApiError::Forbidden("x".into()), StatusCode::FORBIDDEN, "forbidden"),
-            (ApiError::NotFound("x".into()), StatusCode::NOT_FOUND, "not_found"),
-            (ApiError::Conflict("x".into()), StatusCode::CONFLICT, "conflict"),
+            (
+                ApiError::BadRequest("x".into()),
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+            ),
+            (
+                ApiError::Unauthorized("x".into()),
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+            ),
+            (
+                ApiError::Forbidden("x".into()),
+                StatusCode::FORBIDDEN,
+                "forbidden",
+            ),
+            (
+                ApiError::NotFound("x".into()),
+                StatusCode::NOT_FOUND,
+                "not_found",
+            ),
+            (
+                ApiError::Conflict("x".into()),
+                StatusCode::CONFLICT,
+                "conflict",
+            ),
         ];
 
         for (err, status, code) in cases {

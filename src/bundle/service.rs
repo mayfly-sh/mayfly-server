@@ -85,8 +85,8 @@ impl BundleService {
 
         let now = self.clock.now();
         let created_at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
-        let expires_at = (now + Duration::seconds(self.ttl_seconds))
-            .to_rfc3339_opts(SecondsFormat::Secs, true);
+        let expires_at =
+            (now + Duration::seconds(self.ttl_seconds)).to_rfc3339_opts(SecondsFormat::Secs, true);
         let algorithm = self.signer.algorithm().to_string();
 
         let message = canonical_message(&CanonicalInput {
@@ -95,12 +95,11 @@ impl BundleService {
             created_at: &created_at,
             expires_at: &expires_at,
             fingerprint: &public.fingerprint,
-            algorithm: &algorithm,
             keys: &keys,
         })?;
 
         Ok(SignedBundle {
-            bundle_version: BUNDLE_VERSION.to_string(),
+            bundle_version: BUNDLE_VERSION,
             generation: public.generation,
             created_at,
             expires_at,
@@ -108,7 +107,7 @@ impl BundleService {
             keys,
             signature_algorithm: algorithm,
             signature: self.signer.sign_b64(&message),
-            signing_public_key: self.signer.public_key_b64(),
+            bundle_signing_public_key: self.signer.public_key_openssh(),
         })
     }
 
@@ -143,11 +142,10 @@ impl BundleService {
     /// Check that a machine row exists (used for non-success acks, which do not
     /// mutate sync state but must still come from a known machine).
     pub async fn machine_exists(&self, machine_id: &str) -> Result<bool, sqlx::Error> {
-        let row: Option<(i64,)> =
-            sqlx::query_as("SELECT 1 FROM machines WHERE machine_id = ?")
-                .bind(machine_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM machines WHERE machine_id = ?")
+            .bind(machine_id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.is_some())
     }
 
@@ -228,7 +226,10 @@ impl BundleService {
         id: &str,
         _now: DateTime<Utc>,
     ) -> Result<RetirementAssessment, CaError> {
-        let record = self.ca.get(id).ok_or_else(|| CaError::NotFound(id.to_string()))?;
+        let record = self
+            .ca
+            .get(id)
+            .ok_or_else(|| CaError::NotFound(id.to_string()))?;
 
         if record.enabled {
             return Ok(RetirementAssessment {
@@ -253,10 +254,9 @@ impl BundleService {
 
         // Machines that synced before the cutoff may still trust the key; a
         // never-synced machine (NULL) is unknown, so we count it as affected.
-        let synced: Vec<Option<i64>> =
-            sqlx::query_scalar("SELECT synced_generation FROM machines")
-                .fetch_all(&self.pool)
-                .await?;
+        let synced: Vec<Option<i64>> = sqlx::query_scalar("SELECT synced_generation FROM machines")
+            .fetch_all(&self.pool)
+            .await?;
 
         let mut affected = 0i64;
         let mut oldest: Option<i64> = None;
@@ -323,10 +323,7 @@ mod tests {
         let ca = manager(clock.clone()).await;
         let signer = Arc::new(Ed25519BundleSigner::from_seed(&[5u8; 32]));
         let pinned = Ed25519BundleSigner::from_seed(&[5u8; 32]);
-        (
-            BundleService::new(pool, ca, signer, clock, 3600),
-            pinned,
-        )
+        (BundleService::new(pool, ca, signer, clock, 3600), pinned)
     }
 
     #[tokio::test]
@@ -334,7 +331,7 @@ mod tests {
         let c = clock();
         let (svc, pinned) = service(c.clone() as Arc<dyn Clock>).await;
         let bundle = svc.build_signed_bundle().expect("build");
-        assert_eq!(bundle.bundle_version, "v1");
+        assert_eq!(bundle.bundle_version, 1);
         assert_eq!(bundle.generation, 1);
         assert_eq!(bundle.keys.len(), 1);
         verify_signed_bundle(&bundle, &pinned.public_key_bytes(), c.now()).expect("verify");
@@ -345,7 +342,11 @@ mod tests {
         let c = clock();
         let (svc, _) = service(c.clone() as Arc<dyn Clock>).await;
         assert_eq!(svc.current_fingerprint(), svc.ca.bundle_fingerprint());
-        assert!(svc.build_signed_bundle().unwrap().fingerprint.starts_with("sha256:"));
+        assert!(svc
+            .build_signed_bundle()
+            .unwrap()
+            .fingerprint
+            .starts_with("sha256:"));
     }
 
     #[tokio::test]

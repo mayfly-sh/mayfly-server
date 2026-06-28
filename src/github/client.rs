@@ -24,10 +24,7 @@ pub trait GitHubClient: Send + Sync {
     async fn start_device_flow(&self) -> Result<DeviceAuthorization, GitHubError>;
 
     /// Poll for the device-flow result (`POST /login/oauth/access_token`).
-    async fn poll_device_flow(
-        &self,
-        device_code: &str,
-    ) -> Result<DeviceTokenOutcome, GitHubError>;
+    async fn poll_device_flow(&self, device_code: &str) -> Result<DeviceTokenOutcome, GitHubError>;
 
     /// Resolve the identity behind an access token (`GET /user`).
     async fn get_user(&self, access_token: &str) -> Result<GitHubUser, GitHubError>;
@@ -154,10 +151,7 @@ impl GitHubClient for RealGitHubClient {
             .map_err(|err| GitHubError::Decode(err.to_string()))
     }
 
-    async fn poll_device_flow(
-        &self,
-        device_code: &str,
-    ) -> Result<DeviceTokenOutcome, GitHubError> {
+    async fn poll_device_flow(&self, device_code: &str) -> Result<DeviceTokenOutcome, GitHubError> {
         let resp = self
             .http
             .post(format!("{}/login/oauth/access_token", self.device_base_url))
@@ -196,7 +190,8 @@ impl GitHubClient for RealGitHubClient {
             Some("slow_down") => Ok(DeviceTokenOutcome::SlowDown),
             Some("expired_token") => Ok(DeviceTokenOutcome::Expired),
             Some("access_denied") => Ok(DeviceTokenOutcome::Denied),
-            Some("incorrect_device_code") | Some("invalid_grant")
+            Some("incorrect_device_code")
+            | Some("invalid_grant")
             | Some("unsupported_grant_type") => Err(GitHubError::InvalidDeviceCode),
             _ => Err(GitHubError::Decode(
                 "token response had neither access_token nor a known error".to_string(),
@@ -282,19 +277,29 @@ pub struct UnconfiguredGitHubClient;
 #[async_trait]
 impl GitHubClient for UnconfiguredGitHubClient {
     async fn start_device_flow(&self) -> Result<DeviceAuthorization, GitHubError> {
-        Err(GitHubError::Transport("github client is not configured".into()))
+        Err(GitHubError::Transport(
+            "github client is not configured".into(),
+        ))
     }
     async fn poll_device_flow(&self, _: &str) -> Result<DeviceTokenOutcome, GitHubError> {
-        Err(GitHubError::Transport("github client is not configured".into()))
+        Err(GitHubError::Transport(
+            "github client is not configured".into(),
+        ))
     }
     async fn get_user(&self, _: &str) -> Result<GitHubUser, GitHubError> {
-        Err(GitHubError::Transport("github client is not configured".into()))
+        Err(GitHubError::Transport(
+            "github client is not configured".into(),
+        ))
     }
     async fn get_user_orgs(&self, _: &str) -> Result<Vec<String>, GitHubError> {
-        Err(GitHubError::Transport("github client is not configured".into()))
+        Err(GitHubError::Transport(
+            "github client is not configured".into(),
+        ))
     }
     async fn get_user_teams(&self, _: &str) -> Result<Vec<String>, GitHubError> {
-        Err(GitHubError::Transport("github client is not configured".into()))
+        Err(GitHubError::Transport(
+            "github client is not configured".into(),
+        ))
     }
 }
 
@@ -339,7 +344,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let auth = client(&server.uri()).start_device_flow().await.expect("start");
+        let auth = client(&server.uri())
+            .start_device_flow()
+            .await
+            .expect("start");
         assert_eq!(auth.device_code, "dc-123");
         assert_eq!(auth.user_code, "ABCD-EFGH");
         assert_eq!(auth.expires_in, 900);
@@ -355,7 +363,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = client(&server.uri()).start_device_flow().await.expect_err("fail");
+        let err = client(&server.uri())
+            .start_device_flow()
+            .await
+            .expect_err("fail");
         assert!(matches!(err, GitHubError::UnexpectedStatus { status: 500 }));
     }
 
@@ -363,7 +374,10 @@ mod tests {
     async fn poll_pending() {
         let server = MockServer::start().await;
         mount_token_error(&server, "authorization_pending").await;
-        let outcome = client(&server.uri()).poll_device_flow("dc").await.expect("poll");
+        let outcome = client(&server.uri())
+            .poll_device_flow("dc")
+            .await
+            .expect("poll");
         assert_eq!(outcome, DeviceTokenOutcome::Pending);
     }
 
@@ -371,7 +385,10 @@ mod tests {
     async fn poll_slow_down() {
         let server = MockServer::start().await;
         mount_token_error(&server, "slow_down").await;
-        let outcome = client(&server.uri()).poll_device_flow("dc").await.expect("poll");
+        let outcome = client(&server.uri())
+            .poll_device_flow("dc")
+            .await
+            .expect("poll");
         assert_eq!(outcome, DeviceTokenOutcome::SlowDown);
     }
 
@@ -379,7 +396,10 @@ mod tests {
     async fn poll_expired() {
         let server = MockServer::start().await;
         mount_token_error(&server, "expired_token").await;
-        let outcome = client(&server.uri()).poll_device_flow("dc").await.expect("poll");
+        let outcome = client(&server.uri())
+            .poll_device_flow("dc")
+            .await
+            .expect("poll");
         assert_eq!(outcome, DeviceTokenOutcome::Expired);
     }
 
@@ -387,7 +407,10 @@ mod tests {
     async fn poll_denied() {
         let server = MockServer::start().await;
         mount_token_error(&server, "access_denied").await;
-        let outcome = client(&server.uri()).poll_device_flow("dc").await.expect("poll");
+        let outcome = client(&server.uri())
+            .poll_device_flow("dc")
+            .await
+            .expect("poll");
         assert_eq!(outcome, DeviceTokenOutcome::Denied);
     }
 
@@ -404,7 +427,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let outcome = client(&server.uri()).poll_device_flow("dc").await.expect("poll");
+        let outcome = client(&server.uri())
+            .poll_device_flow("dc")
+            .await
+            .expect("poll");
         assert_eq!(
             outcome,
             DeviceTokenOutcome::Approved {
@@ -429,7 +455,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let user = client(&server.uri()).get_user("gho_secret").await.expect("user");
+        let user = client(&server.uri())
+            .get_user("gho_secret")
+            .await
+            .expect("user");
         assert_eq!(user.login, "vasugarg");
         assert_eq!(user.id, 12345);
         assert_eq!(user.name.as_deref(), Some("Vasu Garg"));
@@ -444,7 +473,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = client(&server.uri()).get_user("bad").await.expect_err("401");
+        let err = client(&server.uri())
+            .get_user("bad")
+            .await
+            .expect_err("401");
         assert!(matches!(err, GitHubError::Unauthorized));
     }
 
@@ -457,7 +489,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = client(&server.uri()).get_user("tok").await.expect_err("decode");
+        let err = client(&server.uri())
+            .get_user("tok")
+            .await
+            .expect_err("decode");
         assert!(matches!(err, GitHubError::Decode(_)));
     }
 
@@ -466,13 +501,14 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/user"))
-            .respond_with(
-                ResponseTemplate::new(403).insert_header("x-ratelimit-remaining", "0"),
-            )
+            .respond_with(ResponseTemplate::new(403).insert_header("x-ratelimit-remaining", "0"))
             .mount(&server)
             .await;
 
-        let err = client(&server.uri()).get_user("tok").await.expect_err("rate");
+        let err = client(&server.uri())
+            .get_user("tok")
+            .await
+            .expect_err("rate");
         assert!(matches!(err, GitHubError::RateLimited));
     }
 
@@ -489,7 +525,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let orgs = client(&server.uri()).get_user_orgs("tok").await.expect("orgs");
+        let orgs = client(&server.uri())
+            .get_user_orgs("tok")
+            .await
+            .expect("orgs");
         assert_eq!(orgs, vec!["acme".to_string(), "globex".to_string()]);
     }
 
@@ -505,8 +544,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let teams = client(&server.uri()).get_user_teams("tok").await.expect("teams");
-        assert_eq!(teams, vec!["acme/platform".to_string(), "globex/sre".to_string()]);
+        let teams = client(&server.uri())
+            .get_user_teams("tok")
+            .await
+            .expect("teams");
+        assert_eq!(
+            teams,
+            vec!["acme/platform".to_string(), "globex/sre".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -518,7 +563,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = client(&server.uri()).get_user_orgs("bad").await.expect_err("401");
+        let err = client(&server.uri())
+            .get_user_orgs("bad")
+            .await
+            .expect_err("401");
         assert!(matches!(err, GitHubError::Unauthorized));
     }
 }

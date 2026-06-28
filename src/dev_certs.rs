@@ -52,8 +52,8 @@ fn generate(dir: &Path, cert_path: &Path, key_path: &Path) -> Result<(), TlsErro
     std::fs::create_dir_all(dir)?;
     restrict_dir_permissions(dir)?;
 
-    let mut params =
-        CertificateParams::new(Vec::<String>::new()).map_err(|e| TlsError::Generate(e.to_string()))?;
+    let mut params = CertificateParams::new(Vec::<String>::new())
+        .map_err(|e| TlsError::Generate(e.to_string()))?;
     let localhost = "localhost"
         .try_into()
         .map_err(|_| TlsError::Generate("invalid DNS SAN 'localhost'".to_string()))?;

@@ -109,8 +109,11 @@ mod tests {
 
     #[test]
     fn load_pem_errors_on_missing_files() {
-        let err = load_pem(Path::new("/nonexistent/cert.pem"), Path::new("/nonexistent/key.pem"))
-            .expect_err("missing files");
+        let err = load_pem(
+            Path::new("/nonexistent/cert.pem"),
+            Path::new("/nonexistent/key.pem"),
+        )
+        .expect_err("missing files");
         assert!(matches!(err, TlsError::Io(_)));
     }
 }

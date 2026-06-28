@@ -208,13 +208,17 @@ mod tests {
 
     #[tokio::test]
     async fn bearer_token_extracts_value() {
-        let token = extract_bearer(Some("Bearer gho_secret")).await.expect("token");
+        let token = extract_bearer(Some("Bearer gho_secret"))
+            .await
+            .expect("token");
         assert_eq!(token.0, "gho_secret");
     }
 
     #[tokio::test]
     async fn bearer_token_accepts_lowercase_scheme() {
-        let token = extract_bearer(Some("bearer gho_secret")).await.expect("token");
+        let token = extract_bearer(Some("bearer gho_secret"))
+            .await
+            .expect("token");
         assert_eq!(token.0, "gho_secret");
     }
 
@@ -226,7 +230,9 @@ mod tests {
 
     #[tokio::test]
     async fn bearer_token_wrong_scheme_is_unauthorized() {
-        let err = extract_bearer(Some("Basic abc123")).await.expect_err("scheme");
+        let err = extract_bearer(Some("Basic abc123"))
+            .await
+            .expect_err("scheme");
         assert!(matches!(err, ApiError::Unauthorized(_)));
     }
 

@@ -19,7 +19,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let encrypted = key.encrypt(&mut OsRng, PASSPHRASE)?;
 
     std::fs::create_dir_all("testdata")?;
-    std::fs::write("testdata/ca_test", encrypted.to_openssh(LineEnding::LF)?.as_bytes())?;
+    std::fs::write(
+        "testdata/ca_test",
+        encrypted.to_openssh(LineEnding::LF)?.as_bytes(),
+    )?;
     std::fs::write(
         "testdata/ca_test.pub",
         encrypted.public_key().to_openssh()?.as_bytes(),

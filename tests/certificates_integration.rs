@@ -87,7 +87,10 @@ async fn mount_user(server: &MockServer, login: &str, id: u64) {
 }
 
 async fn call(state: AppState, request: Request<Body>) -> (StatusCode, Value) {
-    let response = build_router(state).oneshot(request).await.expect("response");
+    let response = build_router(state)
+        .oneshot(request)
+        .await
+        .expect("response");
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -127,7 +130,9 @@ fn validate_request(certificate: &str) -> Request<Body> {
         .method("GET")
         .uri("/api/v1/certificates/validate")
         .header("content-type", "application/json")
-        .body(Body::from(json!({ "certificate": certificate }).to_string()))
+        .body(Body::from(
+            json!({ "certificate": certificate }).to_string(),
+        ))
         .unwrap()
 }
 

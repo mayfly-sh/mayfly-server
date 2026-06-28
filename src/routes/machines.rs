@@ -38,7 +38,7 @@ pub async fn enroll(
         bundle_cfg.jitter_percent,
         state.jitter().as_ref(),
     );
-    let bundle_signing_key = state.bundle_signer().map(|s| s.public_key_b64());
+    let bundle_signing_key = state.bundle_signer().map(|s| s.public_key_openssh());
 
     let service = EnrollmentService::sqlite(state.db().clone(), state.clock_arc(), server_identity)
         .with_sync_interval(sync_interval)

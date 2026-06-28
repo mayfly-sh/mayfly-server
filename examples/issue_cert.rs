@@ -26,7 +26,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Bundle fingerprint: {}", ca.bundle_fingerprint());
 
     // A throwaway subject key to be signed.
-    let subject = ssh_key::PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)?;
+    let subject =
+        ssh_key::PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)?;
     let request = CertificateRequest {
         github_login: "vasugarg".to_string(),
         hostname: "web-01".to_string(),
@@ -44,6 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("principals:  {:?}", cert.valid_principals());
     println!("serial:      {}", cert.serial());
     println!("key_id:      {}", cert.key_id());
-    println!("extensions:  {:?}", cert.extensions().keys().collect::<Vec<_>>());
+    println!(
+        "extensions:  {:?}",
+        cert.extensions().keys().collect::<Vec<_>>()
+    );
     Ok(())
 }

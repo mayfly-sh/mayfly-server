@@ -73,7 +73,9 @@ pub async fn generate(
     let identity = authorize_admin(&state, &token, "ca.generate").await?;
     let ca = require_ca(&state)?;
 
-    let record = ca.generate(request.key_id.trim(), &request.passphrase).await?;
+    let record = ca
+        .generate(request.key_id.trim(), &request.passphrase)
+        .await?;
     audit_lifecycle(&state, &identity, "ca.generated", &record).await?;
     Ok((StatusCode::CREATED, Json(record)))
 }
@@ -88,7 +90,11 @@ pub async fn import(
     let ca = require_ca(&state)?;
 
     let record = ca
-        .import(request.key_id.trim(), &request.private_key, &request.passphrase)
+        .import(
+            request.key_id.trim(),
+            &request.private_key,
+            &request.passphrase,
+        )
         .await?;
     audit_lifecycle(&state, &identity, "ca.imported", &record).await?;
     Ok((StatusCode::CREATED, Json(record)))
@@ -136,7 +142,9 @@ pub async fn patch(
     // Apply rename first so a subsequent enable/disable audit reflects the new
     // id. Each mutation goes through the manager, which persists and (for
     // enable/disable) bumps the bundle generation.
-    let mut record = ca.get(&id).ok_or_else(|| ApiError::NotFound(format!("ca '{id}' was not found")))?;
+    let mut record = ca
+        .get(&id)
+        .ok_or_else(|| ApiError::NotFound(format!("ca '{id}' was not found")))?;
 
     if let Some(new_key_id) = request.key_id.as_deref() {
         let new_key_id = new_key_id.trim();
@@ -228,7 +236,14 @@ pub async fn retire(
             affected = assessment.affected_machines,
             "ca retirement denied: machines still depend on the key",
         );
-        audit_retirement(&state, &identity, "ca.retirement.denied", &assessment, false).await?;
+        audit_retirement(
+            &state,
+            &identity,
+            "ca.retirement.denied",
+            &assessment,
+            false,
+        )
+        .await?;
         return Err(ApiError::Conflict(format!(
             "retirement unsafe: {}",
             assessment.reason
@@ -330,9 +345,9 @@ async fn authorize_admin(
 
 /// The CA manager, or a 500 if the server was started without one.
 fn require_ca(state: &AppState) -> Result<Arc<CaManager>, ApiError> {
-    state
-        .ca()
-        .ok_or_else(|| ApiError::internal(anyhow::anyhow!("certificate authority is not configured")))
+    state.ca().ok_or_else(|| {
+        ApiError::internal(anyhow::anyhow!("certificate authority is not configured"))
+    })
 }
 
 /// Append a fail-closed audit event for a CA lifecycle change. The metadata

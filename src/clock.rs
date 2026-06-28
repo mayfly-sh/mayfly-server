@@ -85,7 +85,9 @@ impl TestClock {
 
     /// Lock the inner mutex, recovering from poisoning rather than panicking.
     fn lock(&self) -> std::sync::MutexGuard<'_, DateTime<Utc>> {
-        self.current.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.current
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -126,7 +128,8 @@ mod tests {
 
     #[test]
     fn test_clock_set_is_visible_through_trait_object() {
-        let clock: Arc<dyn Clock> = Arc::new(TestClock::at_rfc3339("2026-06-24T12:00:00Z").unwrap());
+        let clock: Arc<dyn Clock> =
+            Arc::new(TestClock::at_rfc3339("2026-06-24T12:00:00Z").unwrap());
         let observer = Arc::clone(&clock);
         assert_eq!(observer.now_rfc3339(), "2026-06-24T12:00:00.000Z");
     }
