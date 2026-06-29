@@ -152,9 +152,18 @@ fn require_bundle(state: &AppState) -> Result<BundleService, ApiError> {
     })
 }
 
+/// The strong `ETag` header value for a bundle: the fingerprint, double-quoted.
+///
+/// This is the single definition of the ETag wire format; it is exercised by the
+/// cross-repository golden vectors (BL-026) so the agent's `If-None-Match`
+/// formatting and the server's `ETag` can never drift apart.
+pub(crate) fn etag_value(fingerprint: &str) -> String {
+    format!("\"{fingerprint}\"")
+}
+
 /// Set a strong `ETag` header to the (quoted) bundle fingerprint.
 fn insert_etag(response: &mut Response, fingerprint: &str) {
-    if let Ok(value) = HeaderValue::from_str(&format!("\"{fingerprint}\"")) {
+    if let Ok(value) = HeaderValue::from_str(&etag_value(fingerprint)) {
         response.headers_mut().insert(ETAG, value);
     }
 }

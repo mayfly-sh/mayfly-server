@@ -26,3 +26,6 @@ pub mod secret;
 pub mod server;
 pub mod state;
 pub mod tls;
+
+#[cfg(test)]
+mod golden_vectors;
