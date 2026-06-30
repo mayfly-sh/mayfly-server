@@ -12,6 +12,7 @@ pub mod ca_bundle;
 pub mod certificates;
 pub mod health;
 pub mod machines;
+pub mod ops;
 pub mod ready;
 pub mod servers;
 
@@ -139,9 +140,27 @@ pub fn build_router(state: AppState) -> Router {
             &format!("{API_V1}/admin/machines/{{id}}/rotate-identity"),
             post(admin_machines::rotate_identity),
         )
+        // Operational console (013C): read-only audit search/stream, health,
+        // status, and API metrics. Authorized deny-by-default; reads are not
+        // audited (only denials are).
+        .route(&format!("{API_V1}/admin/audit"), get(ops::audit_search))
+        .route(
+            &format!("{API_V1}/admin/audit/stream"),
+            get(ops::audit_stream),
+        )
+        .route(&format!("{API_V1}/admin/health"), get(ops::health))
+        .route(&format!("{API_V1}/admin/status"), get(ops::status))
+        .route(&format!("{API_V1}/admin/metrics"), get(ops::metrics))
         // The heartbeat route is gated by the Ed25519 signature middleware via
         // `route_layer`, so only that endpoint requires a signed request.
         .merge(signed_agent_routes(state.clone()))
+        // Record per-route request metrics for `GET /admin/metrics`. Applied with
+        // `route_layer` so it runs after routing and sees the matched-path
+        // template (keeps metric cardinality bounded by route, not by id).
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::ops::record_metrics,
+        ))
         .layer(axum::middleware::from_fn(propagate_request_id))
         .with_state(state)
 }

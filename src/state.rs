@@ -18,6 +18,7 @@ use crate::ca::{CaManager, OsRandom, RandomSource};
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::github::{GitHubClient, UnconfiguredGitHubClient};
+use crate::ops::ApiMetrics;
 
 /// Application-wide shared state.
 #[derive(Clone)]
@@ -45,6 +46,8 @@ pub struct AppState {
     jitter: Arc<dyn RandomSource>,
     /// Replay-protection nonce cache shared across requests.
     nonce_cache: Arc<dyn NonceCache>,
+    /// In-memory API request metrics (operational telemetry; resets on restart).
+    metrics: Arc<ApiMetrics>,
     /// When the process finished initializing, per `clock`.
     started_at: DateTime<Utc>,
 }
@@ -67,8 +70,14 @@ impl AppState {
             bundle_signer: None,
             jitter: Arc::new(OsRandom),
             nonce_cache: Arc::new(InMemoryNonceCache::new()),
+            metrics: Arc::new(ApiMetrics::new()),
             started_at,
         }
+    }
+
+    /// Borrow the shared API metrics collector.
+    pub fn metrics(&self) -> Arc<ApiMetrics> {
+        Arc::clone(&self.metrics)
     }
 
     /// Inject a custom nonce cache (builder style); defaults to an in-memory

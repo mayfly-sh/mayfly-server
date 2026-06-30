@@ -21,6 +21,7 @@ pub mod errors;
 pub mod github;
 pub mod logging;
 pub mod machines;
+pub mod ops;
 pub mod request_id;
 pub mod routes;
 pub mod secret;

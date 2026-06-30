@@ -5,6 +5,7 @@
 //! and never read directly from `Utc::now()` in business logic.
 
 use crate::audit::model::{AuditTip, AuditVerificationResult, NewAuditEntry};
+use crate::audit::query::{AuditPage, AuditQuery};
 use crate::audit::repository::AuditRepository;
 use crate::audit::verifier;
 use crate::clock::Clock;
@@ -55,6 +56,16 @@ impl AuditService {
         }
 
         Ok(result)
+    }
+
+    /// Search the audit log (read-only) with the given filter.
+    pub async fn search(&self, query: &AuditQuery) -> Result<AuditPage, AuditError> {
+        self.repository.search(query).await
+    }
+
+    /// Count entries matching the filter (read-only).
+    pub async fn count(&self, query: &AuditQuery) -> Result<i64, AuditError> {
+        self.repository.count(query).await
     }
 
     /// Return the current head of the chain, or `None` if the log is empty.

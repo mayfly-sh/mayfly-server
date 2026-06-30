@@ -26,6 +26,10 @@ pub const CA_MANAGEMENT_MIGRATION: &str = include_str!("migrations/005_ca_manage
 /// (`disabled_generation`, `retired`, `retired_at`).
 pub const CA_RETIREMENT_MIGRATION: &str = include_str!("migrations/006_ca_retirement.sql");
 
+/// SQL migration adding read-only search indexes to `audit_log`
+/// (`event_type`, `actor`, `subject`, `recorded_at`). Index-only; idempotent.
+pub const AUDIT_INDEXES_MIGRATION: &str = include_str!("migrations/007_audit_indexes.sql");
+
 /// Connect to SQLite and apply audit schema migrations.
 ///
 /// Uses an in-memory database when `database_url` is `:memory:`.
@@ -118,6 +122,15 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
                 ))
             })?;
     }
+
+    // Audit search indexes are index-only and fully idempotent
+    // (`CREATE INDEX IF NOT EXISTS`), so run unconditionally on every startup.
+    sqlx::raw_sql(AUDIT_INDEXES_MIGRATION)
+        .execute(pool)
+        .await
+        .map_err(|err| {
+            sqlx::Error::Protocol(format!("failed to apply audit indexes migration: {err}"))
+        })?;
     Ok(())
 }
 

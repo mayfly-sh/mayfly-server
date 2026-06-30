@@ -171,6 +171,11 @@ All endpoints are served under the `/api/v1` prefix.
 | `DELETE`| `/admin/machines/{id}`     | Bearer      | Permanently delete a machine record.                 |
 | `POST` | `/admin/machines/{id}/reenroll` | Bearer  | Revoke + mint a fresh single-use enrollment token.   |
 | `POST` | `/admin/machines/{id}/rotate-identity` | Bearer | Rotate identity (revoke + new enrollment token). |
+| `GET`  | `/admin/audit`              | Bearer      | Search the audit log (filter by machine/operator/provider/serial/request-id/event-type/result/date; paginated). |
+| `GET`  | `/admin/audit/stream`       | Bearer      | Incremental audit tail (ascending; `?after=<chain_position>` cursor). |
+| `GET`  | `/admin/health`             | Bearer      | Rolled-up fleet health (status, machines, rollout, certificate/auth activity, bundle, audit). |
+| `GET`  | `/admin/status`             | Bearer      | Cluster/system status (version, uptime, CA inventory, bundle generation, API summary). |
+| `GET`  | `/admin/metrics`            | Bearer      | In-memory API request statistics + per-route timings (ephemeral telemetry). |
 | `POST` | `/machines/enroll`          | Token       | Enroll an agent; returns intervals + Bundle Signing Key to pin. |
 | `POST` | `/agent/heartbeat`          | Ed25519 sig | Agent liveness heartbeat.                            |
 | `GET`  | `/agent/ca-bundle`          | Ed25519 sig | Fetch the current **signed** CA bundle (ETag / `304`).|
@@ -323,6 +328,35 @@ privacy-preserving **client context**. Reads (`list`/`get`/`stats`/`bundle`/
 `public-key`/`retirement`/`status`) are authorized but intentionally not audited,
 so CLI `--watch` polling cannot flood the audit log. Passphrases and private key
 material are never logged, audited, or returned.
+
+### Operational console (audit / health / status / metrics)
+
+The `/admin/audit`, `/admin/audit/stream`, `/admin/health`, `/admin/status`, and
+`/admin/metrics` endpoints make the platform observable from the `mayfly` CLI
+(`audit`/`events`/`history`/`health`/`status`/`metrics`/`doctor`) — an operator
+can investigate and troubleshoot the whole fleet **without manual REST calls**.
+All are **Bearer-authenticated and authorized deny-by-default**.
+
+- **Audit search** (`GET /admin/audit`) is a read-only query layer over the
+  existing append-only `audit_log` (the append path, hash chain, and triggers are
+  untouched). It filters by `event_type` (exact or `prefix.`), `actor`,
+  `machine`/hostname, `provider`, `serial`, `request_id`, `result`
+  (`success`/`failure`, derived from the event type), and `since`/`until`, with
+  `limit` + `chain_position` cursor paging. Search performance is backed by the
+  index-only **migration 007** (`event_type`/`actor`/`subject`/`recorded_at`).
+- **Audit stream** (`GET /admin/audit/stream?after=<position>`) returns new
+  entries in ascending order for incremental tailing (`mayfly audit --follow`).
+- **Health / status** roll up existing services (bundle/machine/CA/audit) into a
+  single fleet view; the CLI renders, the server composes.
+- **Metrics** (`GET /admin/metrics`) exposes in-memory per-route request counts,
+  status-code breakdown, and latency (avg/p50/p95/max) collected by a transparent
+  router middleware. Metrics are **ephemeral operational telemetry** (reset on
+  restart), bounded against route-cardinality blowup — they are **not** audit.
+
+Like the other admin reads, these endpoints are authorized but **not** audited
+(so polling/streaming cannot flood the chain); only an **authorization denial**
+(`ops.admin_denied`) is recorded. Audit metadata returned to the CLI never
+contains secrets, tokens, private keys, or full certificates.
 
 ## Configuration reference
 
