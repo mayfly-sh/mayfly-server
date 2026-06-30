@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use anyhow::Context;
+use mayfly_server::auth::{AuthenticationProvider, KeycloakProvider, KeycloakProviderConfig};
 use mayfly_server::bundle::{BundleSigner, Ed25519BundleSigner};
 use mayfly_server::ca::CaManager;
 use mayfly_server::clock::SystemClock;
@@ -82,13 +83,35 @@ async fn main() -> anyhow::Result<()> {
         "bundle signing key ready",
     );
 
-    // 7. Shared application state with the production clock.
-    let state = AppState::new(config, pool, clock)
+    // 7. Optional Keycloak/OIDC authentication provider (pluggable auth).
+    //    Enabled when MAYFLY_KEYCLOAK_ISSUER is set; GitHub remains the default
+    //    provider. Adding further providers is one registration, no logic changes.
+    let keycloak_provider: Option<Arc<dyn AuthenticationProvider>> =
+        std::env::var("MAYFLY_KEYCLOAK_ISSUER")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|issuer| {
+                Arc::new(KeycloakProvider::new(KeycloakProviderConfig {
+                    issuer_url: issuer,
+                    client_id: std::env::var("MAYFLY_KEYCLOAK_CLIENT_ID").unwrap_or_default(),
+                    client_secret: std::env::var("MAYFLY_KEYCLOAK_CLIENT_SECRET")
+                        .ok()
+                        .filter(|s| !s.is_empty()),
+                    scopes: std::env::var("MAYFLY_KEYCLOAK_SCOPES").unwrap_or_default(),
+                })) as Arc<dyn AuthenticationProvider>
+            });
+
+    // 8. Shared application state with the production clock.
+    let mut state = AppState::new(config, pool, clock)
         .with_github(github)
         .with_ca(ca)
         .with_bundle_signer(bundle_signer);
+    if let Some(provider) = keycloak_provider {
+        state = state.with_provider(provider);
+        tracing::info!("keycloak authentication provider registered");
+    }
 
-    // 8. Serve HTTPS until a shutdown signal is received.
+    // 9. Serve HTTPS until a shutdown signal is received.
     server::run(state).await?;
 
     tracing::info!("server stopped");

@@ -11,6 +11,7 @@ use sqlx::SqlitePool;
 
 use crate::agentauth::{InMemoryNonceCache, NonceCache};
 use crate::audit::AuditService;
+use crate::auth::{AuthenticationProvider, GitHubProvider, ProviderRegistry};
 use crate::authz::AuthzService;
 use crate::bundle::{BundleService, BundleSigner};
 use crate::ca::{CaManager, OsRandom, RandomSource};
@@ -29,6 +30,10 @@ pub struct AppState {
     clock: Arc<dyn Clock>,
     /// GitHub API client (dependency-injected; real or mock).
     github: Arc<dyn GitHubClient>,
+    /// Additional authentication providers (beyond the GitHub provider, which is
+    /// always derived from `github`). Keyed insertion order is irrelevant; the
+    /// registry built in [`AppState::providers`] resolves by id.
+    extra_providers: Vec<Arc<dyn AuthenticationProvider>>,
     /// SSH certificate-authority manager, loaded at startup. `None` until
     /// injected. The manager is the single owner of all CA key state.
     ca: Option<Arc<CaManager>>,
@@ -57,6 +62,7 @@ impl AppState {
             db,
             clock,
             github: Arc::new(UnconfiguredGitHubClient),
+            extra_providers: Vec::new(),
             ca: None,
             bundle_signer: None,
             jitter: Arc::new(OsRandom),
@@ -95,6 +101,31 @@ impl AppState {
     /// Borrow the GitHub client handle.
     pub fn github(&self) -> Arc<dyn GitHubClient> {
         Arc::clone(&self.github)
+    }
+
+    /// Register an additional authentication provider (builder style), e.g. a
+    /// configured Keycloak provider. The GitHub provider is always present and
+    /// derived from the injected GitHub client, so it need not be added here.
+    #[must_use]
+    pub fn with_provider(mut self, provider: Arc<dyn AuthenticationProvider>) -> Self {
+        self.extra_providers.push(provider);
+        self
+    }
+
+    /// Build the authentication [`ProviderRegistry`] for this request.
+    ///
+    /// The registry always contains a GitHub provider derived from the current
+    /// GitHub client (so `with_github` is reflected), plus any providers added
+    /// via [`AppState::with_provider`]. GitHub is the default selection. The
+    /// registry is cheap to build (only `Arc` clones), so handlers construct one
+    /// per request rather than storing it.
+    pub fn providers(&self) -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new(crate::auth::github::PROVIDER_ID)
+            .with(Arc::new(GitHubProvider::new(Arc::clone(&self.github))));
+        for provider in &self.extra_providers {
+            registry.register(Arc::clone(provider));
+        }
+        registry
     }
 
     /// The SSH certificate-authority manager, if one has been injected.

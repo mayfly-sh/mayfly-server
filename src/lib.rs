@@ -7,6 +7,7 @@
 
 pub mod agentauth;
 pub mod audit;
+pub mod auth;
 pub mod authz;
 pub mod bundle;
 pub mod ca;

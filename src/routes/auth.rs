@@ -8,27 +8,53 @@
 //! and never touch HTTP/GitHub directly. Access tokens and device codes appear
 //! only in request/response bodies and are never logged.
 
-use axum::extract::{FromRequestParts, State};
+use axum::extract::{FromRequestParts, Query, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
-use axum::Json;
+use axum::http::HeaderMap;
+use axum::{Extension, Json};
+use serde::Deserialize;
 use serde_json::json;
 
-use crate::audit::NewAuditEntry;
+use crate::audit::{NewAuditEntry, RequestAuditContext};
+use crate::auth::{DeviceAuthorization, DeviceTokenOutcome};
 use crate::authz::Identity;
 use crate::errors::ApiError;
-use crate::github::models::{DevicePollRequest, PollResponse, WhoamiResponse};
-use crate::github::DeviceTokenOutcome;
+use crate::github::models::{PollResponse, WhoamiResponse};
+use crate::request_id::RequestId;
 use crate::state::AppState;
+
+/// Optional `?provider=<id>` selector for the device flow. Absent or empty
+/// selects the configured default provider.
+#[derive(Debug, Deserialize, Default)]
+pub struct ProviderQuery {
+    /// Provider id to authenticate against (e.g. `github`, `keycloak`).
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
+/// Request body for `POST /api/v1/auth/device/poll`. The optional `provider`
+/// must match the one used at `device/start`.
+#[derive(Debug, Deserialize)]
+pub struct DevicePollBody {
+    /// The `device_code` issued by `device/start`.
+    pub device_code: String,
+    /// Provider id (defaults to the configured default).
+    #[serde(default)]
+    pub provider: Option<String>,
+}
 
 /// Maximum accepted length for a client-supplied `device_code`.
 const MAX_DEVICE_CODE_LEN: usize = 256;
 
-/// `POST /api/v1/auth/device/start` — begin the GitHub device flow.
+/// `POST /api/v1/auth/device/start` — begin a device flow for the selected
+/// provider (default GitHub).
 pub async fn device_start(
     State(state): State<AppState>,
-) -> Result<Json<crate::github::DeviceAuthorization>, ApiError> {
-    let authorization = state.github().start_device_flow().await?;
+    Query(query): Query<ProviderQuery>,
+) -> Result<Json<DeviceAuthorization>, ApiError> {
+    let provider = state.providers().resolve(query.provider.as_deref())?;
+    let authorization = provider.start_device_authorization().await?;
     Ok(Json(authorization))
 }
 
@@ -38,14 +64,17 @@ pub async fn device_start(
 /// expired/denied outcomes are not audited; only a successful authorization is.
 pub async fn device_poll(
     State(state): State<AppState>,
-    Json(request): Json<DevicePollRequest>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
+    Json(request): Json<DevicePollBody>,
 ) -> Result<Json<PollResponse>, ApiError> {
+    let provider = state.providers().resolve(request.provider.as_deref())?;
     let device_code = request.device_code.trim();
     if device_code.is_empty() || device_code.len() > MAX_DEVICE_CODE_LEN {
         return Err(ApiError::BadRequest("device_code is required".to_string()));
     }
 
-    match state.github().poll_device_flow(device_code).await? {
+    match provider.poll_device_authorization(device_code).await? {
         DeviceTokenOutcome::Pending => Ok(Json(PollResponse::status("pending"))),
         DeviceTokenOutcome::SlowDown => Ok(Json(PollResponse::status("slow_down"))),
         DeviceTokenOutcome::Expired => Ok(Json(PollResponse::status("expired"))),
@@ -54,11 +83,13 @@ pub async fn device_poll(
             access_token,
             scope,
         } => {
+            let provider_id = provider.metadata().id;
+
             // Best-effort identity resolution so the audit event is attributable.
             // The authorization already succeeded, so a lookup failure must not
             // deny the token — we still record the event with actor "unknown".
-            let (actor, github_id) = match state.github().get_user(&access_token).await {
-                Ok(user) => (user.login, Some(user.id)),
+            let (actor, subject) = match provider.fetch_identity(&access_token).await {
+                Ok(identity) => (identity.username, Some(identity.subject)),
                 Err(err) => {
                     tracing::warn!(
                         error = %err,
@@ -68,9 +99,21 @@ pub async fn device_poll(
                 }
             };
 
-            let mut metadata = json!({ "scopes": scope });
-            if let Some(id) = github_id {
-                metadata["github_id"] = json!(id);
+            // Enterprise client context (privacy-preserving; never tokens/secrets).
+            let client = RequestAuditContext::from_headers(
+                &headers,
+                Some(request_id.as_str()),
+                state.clock().now(),
+            )
+            .with_provider(provider_id.clone());
+
+            let mut metadata = json!({
+                "provider": provider_id,
+                "scopes": scope,
+                "client": client.to_value(),
+            });
+            if let Some(subject) = subject {
+                metadata["subject"] = json!(subject);
             }
 
             // Audit is fail-closed: if the tamper-evident log cannot record the
@@ -88,19 +131,28 @@ pub async fn device_poll(
 }
 
 /// `GET /api/v1/auth/whoami` — resolve identity from a Bearer access token.
+///
+/// Retained as the GitHub identity echo (`github_login`/`github_id`). The
+/// provider-agnostic identity is available via the auth framework; this endpoint
+/// keeps its GitHub-shaped response for backward compatibility.
 pub async fn whoami(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
     BearerToken(access_token): BearerToken,
 ) -> Result<Json<WhoamiResponse>, ApiError> {
     let user = state.github().get_user(&access_token).await?;
 
     let actor = user.login.clone();
     let github_id = user.id;
+    let client =
+        RequestAuditContext::from_headers(&headers, Some(request_id.as_str()), state.clock().now())
+            .with_provider("github");
     state
         .audit()
         .append_audit_event(
             NewAuditEntry::new("auth.identity_lookup", actor)
-                .with_metadata(json!({ "github_id": github_id })),
+                .with_metadata(json!({ "github_id": github_id, "client": client.to_value() })),
         )
         .await?;
 

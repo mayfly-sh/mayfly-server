@@ -8,12 +8,14 @@
 //! - [`repository`] — append-only SQLite persistence.
 //! - [`service`] — clock-stamped append, tip lookup, and verification.
 
+pub mod context;
 pub mod hash;
 pub mod model;
 pub mod repository;
 pub mod service;
 pub mod verifier;
 
+pub use context::RequestAuditContext;
 pub use hash::{canonicalize, compute_entry_hash, hashes_equal, GENESIS_PREVIOUS_HASH};
 pub use model::{AuditEntry, AuditTip, AuditVerificationResult, NewAuditEntry};
 pub use repository::AuditRepository;
