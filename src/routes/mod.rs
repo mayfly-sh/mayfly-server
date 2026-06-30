@@ -73,6 +73,12 @@ pub fn build_router(state: AppState) -> Router {
             &format!("{API_V1}/admin/bundle/status"),
             get(admin::bundle_status),
         )
+        // Mint enrollment tokens (operator-only; closes BL-007). Same GitHub
+        // Bearer + deny-by-default authorization as the CA admin API.
+        .route(
+            &format!("{API_V1}/admin/machines/enrollment-tokens"),
+            post(admin::mint_enrollment_token),
+        )
         // The heartbeat route is gated by the Ed25519 signature middleware via
         // `route_layer`, so only that endpoint requires a signed request.
         .merge(signed_agent_routes(state.clone()))
