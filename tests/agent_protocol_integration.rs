@@ -368,6 +368,20 @@ async fn old_timestamp_is_rejected() {
 }
 
 #[tokio::test]
+async fn future_timestamp_is_rejected() {
+    let clock = fixed_clock();
+    let state = state(clock.clone()).await;
+    let (public, seed) = agent_key();
+    let machine_id = enroll(&state, &public, "pi-zero").await;
+
+    // 120s in the future — outside the ±60s window. Freshness is bidirectional.
+    let ahead = clock.now().timestamp() + 120;
+    let request = signed_heartbeat(&machine_id, ahead, "nonce-future", &heartbeat_body(), &seed);
+    let (status, _) = call(state.clone(), request).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn missing_signing_headers_are_rejected() {
     let clock = fixed_clock();
     let state = state(clock.clone()).await;
