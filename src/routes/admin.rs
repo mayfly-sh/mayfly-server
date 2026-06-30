@@ -1,32 +1,48 @@
 //! CA management admin API.
 //!
-//! - `POST   /api/v1/admin/ca/generate` — generate a new encrypted Ed25519 CA.
-//! - `POST   /api/v1/admin/ca/import`   — import an existing encrypted CA key.
-//! - `GET    /api/v1/admin/ca`          — list all CA metadata.
-//! - `GET    /api/v1/admin/ca/{id}`     — detailed metadata for one CA.
-//! - `PATCH  /api/v1/admin/ca/{id}`     — enable / disable / rename a CA.
+//! - `POST   /api/v1/admin/ca/generate`        — generate a new encrypted Ed25519 CA.
+//! - `POST   /api/v1/admin/ca/import`          — import an existing encrypted CA key.
+//! - `POST   /api/v1/admin/ca/rotate`          — guided rotation: generate a new CA + report rollout.
+//! - `GET    /api/v1/admin/ca`                 — list all CA metadata (as `CaView`).
+//! - `GET    /api/v1/admin/ca/stats`           — aggregate signing statistics.
+//! - `GET    /api/v1/admin/ca/bundle`          — the current public trust bundle (active CAs).
+//! - `GET    /api/v1/admin/ca/{id}`            — detailed metadata for one CA (`CaView`).
+//! - `GET    /api/v1/admin/ca/{id}/public-key` — export one CA's public key + fingerprint.
+//! - `PATCH  /api/v1/admin/ca/{id}`            — enable / disable / rename a CA.
+//! - `POST   /api/v1/admin/ca/{id}/enable`     — enable a CA.
+//! - `POST   /api/v1/admin/ca/{id}/disable`    — disable a CA.
+//! - `GET    /api/v1/admin/ca/{id}/retirement` — retirement-safety assessment.
+//! - `POST   /api/v1/admin/ca/{id}/retire`     — retire a disabled CA (keeps row, drops key).
+//! - `DELETE /api/v1/admin/ca/{id}`            — delete an unused (disabled, safe) CA.
+//! - `GET    /api/v1/admin/bundle/status`      — fleet rollout visibility.
 //!
-//! Every endpoint authenticates a GitHub Bearer token and authorizes it with
-//! the same deny-by-default policy as certificate issuance. There is
-//! intentionally no delete: disabled CAs are retained for certificate
-//! validation and audit history. Private key material is never returned, and
-//! passphrases are never logged or audited.
+//! Every endpoint authenticates a Bearer token through the provider abstraction
+//! and authorizes it with deny-by-default authorization. Reads
+//! (list/show/stats/bundle/public-key/retirement/status) are authorization-gated
+//! but **not** audited (the CLI polls them in `--watch`, which would flood the
+//! hash-chained log). Every **mutation** and every **denial** appends a
+//! fail-closed audit entry recording the operator identity and the
+//! privacy-preserving client context (ADR-0023). Private key material is never
+//! returned, and passphrases are never logged or audited.
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::Json;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::{Extension, Json};
 use chrono::TimeDelta;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::audit::NewAuditEntry;
+use crate::audit::{NewAuditEntry, RequestAuditContext};
 use crate::authz::{AuthzDecision, AuthzError, Identity};
 use crate::bundle::{BundleService, FleetStatus, RetirementAssessment};
-use crate::ca::{CaManager, CaRecord};
+use crate::ca::{
+    CaManager, CaPublicKeyEntry, CaRecord, CaStats, CaView, PublicBundle, RotationResult,
+};
 use crate::errors::ApiError;
 use crate::machines::EnrollmentService;
+use crate::request_id::RequestId;
 use crate::routes::auth::{resolve_identity, BearerToken};
 use crate::state::AppState;
 
@@ -73,29 +89,54 @@ pub struct PatchCaRequest {
     pub key_id: Option<String>,
 }
 
+/// Request body for `POST /api/v1/admin/ca/rotate`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RotateCaRequest {
+    /// Operator-assigned id for the new CA. When absent, a timestamped id is
+    /// generated.
+    #[serde(default)]
+    pub key_id: Option<String>,
+    /// Passphrase protecting the new key at rest. Must match the storage
+    /// passphrase. Never logged.
+    pub passphrase: String,
+}
+
 /// `POST /api/v1/admin/ca/generate`
 pub async fn generate(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
     BearerToken(token): BearerToken,
     Json(request): Json<GenerateCaRequest>,
-) -> Result<(StatusCode, Json<CaRecord>), ApiError> {
-    let identity = authorize_admin(&state, &token, "ca.generate").await?;
+) -> Result<(StatusCode, Json<CaView>), ApiError> {
+    let identity = authorize_admin(&state, &headers, &request_id, &token, "ca.generate").await?;
     let ca = require_ca(&state)?;
 
     let record = ca
         .generate(request.key_id.trim(), &request.passphrase)
         .await?;
-    audit_lifecycle(&state, &identity, "ca.generated", &record).await?;
-    Ok((StatusCode::CREATED, Json(record)))
+    audit_ca(
+        &state,
+        &identity,
+        &headers,
+        &request_id,
+        "ca.generated",
+        &record,
+        None,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(view(&state, &record))))
 }
 
 /// `POST /api/v1/admin/ca/import`
 pub async fn import(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
     BearerToken(token): BearerToken,
     Json(request): Json<ImportCaRequest>,
-) -> Result<(StatusCode, Json<CaRecord>), ApiError> {
-    let identity = authorize_admin(&state, &token, "ca.import").await?;
+) -> Result<(StatusCode, Json<CaView>), ApiError> {
+    let identity = authorize_admin(&state, &headers, &request_id, &token, "ca.import").await?;
     let ca = require_ca(&state)?;
 
     let record = ca
@@ -105,41 +146,109 @@ pub async fn import(
             &request.passphrase,
         )
         .await?;
-    audit_lifecycle(&state, &identity, "ca.imported", &record).await?;
-    Ok((StatusCode::CREATED, Json(record)))
+    audit_ca(
+        &state,
+        &identity,
+        &headers,
+        &request_id,
+        "ca.imported",
+        &record,
+        None,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(view(&state, &record))))
 }
 
 /// `GET /api/v1/admin/ca`
 pub async fn list(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
     BearerToken(token): BearerToken,
-) -> Result<Json<Vec<CaRecord>>, ApiError> {
-    authorize_admin(&state, &token, "ca.list").await?;
+) -> Result<Json<Vec<CaView>>, ApiError> {
+    authorize_admin(&state, &headers, &request_id, &token, "ca.list").await?;
     let ca = require_ca(&state)?;
-    Ok(Json(ca.list()))
+    let now = state.clock().now();
+    let generation = ca.generation();
+    let views = ca
+        .list()
+        .iter()
+        .map(|r| CaView::from_record(r, generation, now))
+        .collect();
+    Ok(Json(views))
+}
+
+/// `GET /api/v1/admin/ca/stats`
+pub async fn stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
+    BearerToken(token): BearerToken,
+) -> Result<Json<CaStats>, ApiError> {
+    authorize_admin(&state, &headers, &request_id, &token, "ca.stats").await?;
+    let ca = require_ca(&state)?;
+    let stats = CaStats::from_records(&ca.list(), ca.generation(), ca.bundle_fingerprint());
+    Ok(Json(stats))
+}
+
+/// `GET /api/v1/admin/ca/bundle` — the current public trust bundle (active CAs).
+pub async fn public_bundle(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
+    BearerToken(token): BearerToken,
+) -> Result<Json<PublicBundle>, ApiError> {
+    authorize_admin(&state, &headers, &request_id, &token, "ca.bundle").await?;
+    let ca = require_ca(&state)?;
+    Ok(Json(ca.get_public_bundle()))
 }
 
 /// `GET /api/v1/admin/ca/{id}`
 pub async fn get_one(
     State(state): State<AppState>,
-    BearerToken(token): BearerToken,
     Path(id): Path<String>,
-) -> Result<Json<CaRecord>, ApiError> {
-    authorize_admin(&state, &token, "ca.get").await?;
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
+    BearerToken(token): BearerToken,
+) -> Result<Json<CaView>, ApiError> {
+    authorize_admin(&state, &headers, &request_id, &token, "ca.get").await?;
     let ca = require_ca(&state)?;
     ca.get(&id)
-        .map(Json)
+        .map(|r| Json(view(&state, &r)))
+        .ok_or_else(|| ApiError::NotFound(format!("ca '{id}' was not found")))
+}
+
+/// `GET /api/v1/admin/ca/{id}/public-key` — export one CA's public key.
+pub async fn export_public_key(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
+    BearerToken(token): BearerToken,
+) -> Result<Json<CaPublicKeyEntry>, ApiError> {
+    authorize_admin(&state, &headers, &request_id, &token, "ca.export").await?;
+    let ca = require_ca(&state)?;
+    ca.get(&id)
+        .map(|r| {
+            Json(CaPublicKeyEntry {
+                key_id: r.key_id,
+                public_key: r.public_key,
+                fingerprint: r.fingerprint,
+            })
+        })
         .ok_or_else(|| ApiError::NotFound(format!("ca '{id}' was not found")))
 }
 
 /// `PATCH /api/v1/admin/ca/{id}`
 pub async fn patch(
     State(state): State<AppState>,
-    BearerToken(token): BearerToken,
     Path(id): Path<String>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
+    BearerToken(token): BearerToken,
     Json(request): Json<PatchCaRequest>,
-) -> Result<Json<CaRecord>, ApiError> {
-    let identity = authorize_admin(&state, &token, "ca.patch").await?;
+) -> Result<Json<CaView>, ApiError> {
+    let identity = authorize_admin(&state, &headers, &request_id, &token, "ca.patch").await?;
     let ca = require_ca(&state)?;
 
     if request.enabled.is_none() && request.key_id.is_none() {
@@ -159,7 +268,16 @@ pub async fn patch(
         let new_key_id = new_key_id.trim();
         if new_key_id != record.key_id {
             record = ca.rename(&id, new_key_id).await?;
-            audit_lifecycle(&state, &identity, "ca.renamed", &record).await?;
+            audit_ca(
+                &state,
+                &identity,
+                &headers,
+                &request_id,
+                "ca.renamed",
+                &record,
+                None,
+            )
+            .await?;
         }
     }
 
@@ -172,11 +290,294 @@ pub async fn patch(
         };
         if changed {
             let action = if enabled { "ca.enabled" } else { "ca.disabled" };
-            audit_lifecycle(&state, &identity, action, &record).await?;
+            audit_ca(
+                &state,
+                &identity,
+                &headers,
+                &request_id,
+                action,
+                &record,
+                None,
+            )
+            .await?;
         }
     }
 
-    Ok(Json(record))
+    Ok(Json(view(&state, &record)))
+}
+
+/// `POST /api/v1/admin/ca/{id}/enable`
+pub async fn enable(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
+    BearerToken(token): BearerToken,
+) -> Result<Json<CaView>, ApiError> {
+    let identity = authorize_admin(&state, &headers, &request_id, &token, "ca.enable").await?;
+    let ca = require_ca(&state)?;
+    let before = ca
+        .get(&id)
+        .ok_or_else(|| ApiError::NotFound(format!("ca '{id}' was not found")))?;
+    let record = ca.enable(&id).await?;
+    if !before.enabled {
+        audit_ca(
+            &state,
+            &identity,
+            &headers,
+            &request_id,
+            "ca.enabled",
+            &record,
+            None,
+        )
+        .await?;
+    }
+    Ok(Json(view(&state, &record)))
+}
+
+/// `POST /api/v1/admin/ca/{id}/disable`
+pub async fn disable(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
+    BearerToken(token): BearerToken,
+) -> Result<Json<CaView>, ApiError> {
+    let identity = authorize_admin(&state, &headers, &request_id, &token, "ca.disable").await?;
+    let ca = require_ca(&state)?;
+    let before = ca
+        .get(&id)
+        .ok_or_else(|| ApiError::NotFound(format!("ca '{id}' was not found")))?;
+    let record = ca.disable(&id).await?;
+    if before.enabled {
+        audit_ca(
+            &state,
+            &identity,
+            &headers,
+            &request_id,
+            "ca.disabled",
+            &record,
+            None,
+        )
+        .await?;
+    }
+    Ok(Json(view(&state, &record)))
+}
+
+/// `POST /api/v1/admin/ca/rotate` — guided rotation step.
+///
+/// Generates a new enabled CA (bumping the generation so the fleet starts
+/// trusting it) and returns the rollout state needed to finish the rotation
+/// safely. It deliberately does **not** disable or retire the predecessor — the
+/// old CA must keep signing/validating until the fleet has synced the new
+/// generation (ADR-0023). Completes with `disable` + `retire` once converged.
+pub async fn rotate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
+    BearerToken(token): BearerToken,
+    Json(request): Json<RotateCaRequest>,
+) -> Result<(StatusCode, Json<RotationResult>), ApiError> {
+    let identity = authorize_admin(&state, &headers, &request_id, &token, "ca.rotate").await?;
+    let ca = require_ca(&state)?;
+    let service = require_bundle(&state)?;
+    let now = state.clock().now();
+
+    // Snapshot the active set *before* adding the new CA.
+    let previous_active = ca.active_keys();
+
+    let key_id = match request
+        .key_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(k) => k.to_string(),
+        None => format!("mayfly-ca-{}", now.format("%Y%m%dT%H%M%SZ")),
+    };
+
+    let new_record = ca.generate(&key_id, &request.passphrase).await?;
+    let generation = ca.generation();
+
+    audit_ca(
+        &state,
+        &identity,
+        &headers,
+        &request_id,
+        "ca.rotated",
+        &new_record,
+        Some(json!({
+            "generation": generation,
+            "previous_active": previous_active
+                .iter()
+                .map(|r| r.key_id.clone())
+                .collect::<Vec<_>>(),
+        })),
+    )
+    .await?;
+
+    let rollout = service
+        .fleet_status(now)
+        .await
+        .map_err(|e| ApiError::internal(anyhow::Error::new(e)))?;
+
+    let on_latest: i64 = rollout
+        .generations
+        .iter()
+        .filter(|g| g.generation == i64::from(rollout.latest_generation))
+        .map(|g| g.count)
+        .sum();
+    let behind = (rollout.total_machines - on_latest).max(0);
+
+    let mut warnings = vec![format!(
+        "New CA '{}' is active at generation {}. The previous CA(s) remain active during rollout.",
+        new_record.key_id, generation
+    )];
+    if !previous_active.is_empty() {
+        warnings.push(
+            "Do NOT disable or retire the previous CA(s) until the fleet reaches 100% on the new \
+             generation — hosts that have not yet synced would lose trust."
+                .to_string(),
+        );
+    }
+    if behind > 0 {
+        warnings.push(format!(
+            "{behind} machine(s) are not yet on generation {generation} ({:.1}% converged).",
+            rollout.rollout_percentage
+        ));
+    }
+
+    let new_ca = view(&state, &new_record);
+    let previous_active = previous_active
+        .iter()
+        .map(|r| CaView::from_record(r, generation, now))
+        .collect();
+
+    Ok((
+        StatusCode::CREATED,
+        Json(RotationResult {
+            new_ca,
+            previous_active,
+            rollout,
+            warnings,
+        }),
+    ))
+}
+
+/// Query parameters for `DELETE /api/v1/admin/ca/{id}`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DeleteCaParams {
+    /// When `true`, delete even if machines still depend on the key.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Response body for `DELETE /api/v1/admin/ca/{id}`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeleteCaResponse {
+    /// Always `true` on success.
+    pub deleted: bool,
+    /// The deleted CA's id.
+    pub id: String,
+    /// The deleted CA's operator-assigned key id.
+    pub key_id: String,
+}
+
+/// `DELETE /api/v1/admin/ca/{id}` — permanently delete an unused CA.
+///
+/// Unlike retirement, no metadata row is kept. The CA must be disabled (an
+/// enabled CA is refused — disable it first) and, like retirement, no machine
+/// may still depend on the key unless `force=true`. A denied attempt records
+/// `ca.delete.denied`; a forced delete records `ca.delete.forced`; a completed
+/// delete records `ca.deleted`.
+pub async fn delete_ca(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<DeleteCaParams>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
+    BearerToken(token): BearerToken,
+) -> Result<Json<DeleteCaResponse>, ApiError> {
+    let identity = authorize_admin(&state, &headers, &request_id, &token, "ca.delete").await?;
+    let ca = require_ca(&state)?;
+    let service = require_bundle(&state)?;
+
+    let record = ca
+        .get(&id)
+        .ok_or_else(|| ApiError::NotFound(format!("ca '{id}' was not found")))?;
+
+    // An enabled CA is never deletable; surface the clear conflict before any
+    // safety assessment (which would also report it unsafe).
+    if record.enabled {
+        return Err(ApiError::Conflict(format!(
+            "cannot delete ca '{}': it is still active (disable it first)",
+            record.key_id
+        )));
+    }
+
+    let now = state.clock().now();
+    let assessment = service.assess_retirement(&id, now).await?;
+
+    if !assessment.safe && !params.force {
+        tracing::warn!(
+            target: "mayfly::security",
+            actor = %identity.username,
+            key_id = %assessment.key_id,
+            affected = assessment.affected_machines,
+            "ca delete denied: machines still depend on the key",
+        );
+        audit_retirement(
+            &state,
+            &identity,
+            &headers,
+            &request_id,
+            "ca.delete.denied",
+            &assessment,
+            false,
+        )
+        .await?;
+        return Err(ApiError::Conflict(format!(
+            "delete unsafe: {}",
+            assessment.reason
+        )));
+    }
+
+    if !assessment.safe {
+        tracing::warn!(
+            target: "mayfly::security",
+            actor = %identity.username,
+            key_id = %assessment.key_id,
+            affected = assessment.affected_machines,
+            "ca delete FORCED despite dependent machines",
+        );
+        audit_retirement(
+            &state,
+            &identity,
+            &headers,
+            &request_id,
+            "ca.delete.forced",
+            &assessment,
+            true,
+        )
+        .await?;
+    }
+
+    let deleted = ca.delete(&id).await?;
+    audit_ca(
+        &state,
+        &identity,
+        &headers,
+        &request_id,
+        "ca.deleted",
+        &deleted,
+        Some(json!({ "forced": !assessment.safe })),
+    )
+    .await?;
+    Ok(Json(DeleteCaResponse {
+        deleted: true,
+        id: deleted.id,
+        key_id: deleted.key_id,
+    }))
 }
 
 /// Request body for `POST /api/v1/admin/ca/{id}/retire`.
@@ -191,9 +592,11 @@ pub struct RetireCaRequest {
 /// `GET /api/v1/admin/bundle/status` — fleet rollout visibility.
 pub async fn bundle_status(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
     BearerToken(token): BearerToken,
 ) -> Result<Json<FleetStatus>, ApiError> {
-    authorize_admin(&state, &token, "bundle.status").await?;
+    authorize_admin(&state, &headers, &request_id, &token, "bundle.status").await?;
     let service = require_bundle(&state)?;
     let now = state.clock().now();
     let status = service
@@ -251,16 +654,25 @@ pub struct MintEnrollmentTokenResponse {
 
 /// `POST /api/v1/admin/machines/enrollment-tokens` — mint an enrollment token.
 ///
-/// Authenticated and authorized exactly like the CA admin API (GitHub Bearer +
+/// Authenticated and authorized exactly like the CA admin API (Bearer +
 /// deny-by-default). Delegates token generation to the enrollment service, which
 /// persists only the SHA-256 hash. The plaintext is returned once in the
 /// response and is never logged or audited.
 pub async fn mint_enrollment_token(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
     BearerToken(token): BearerToken,
     request: Option<Json<MintEnrollmentTokenRequest>>,
 ) -> Result<(StatusCode, Json<MintEnrollmentTokenResponse>), ApiError> {
-    let identity = authorize_admin(&state, &token, "machine.enrollment_token.mint").await?;
+    let identity = authorize_admin(
+        &state,
+        &headers,
+        &request_id,
+        &token,
+        "machine.enrollment_token.mint",
+    )
+    .await?;
 
     // Enrollment depends on a configured CA (the enroll response embeds the
     // server identity); keep minting consistent with that prerequisite so a
@@ -282,6 +694,9 @@ pub async fn mint_enrollment_token(
 
     // Audit the mint (fail-closed). The record id and metadata are non-secret;
     // the plaintext token is NEVER audited or logged.
+    let client =
+        RequestAuditContext::from_headers(&headers, Some(request_id.as_str()), state.clock().now())
+            .with_provider(identity.provider.clone());
     state
         .audit()
         .append_audit_event(
@@ -291,6 +706,7 @@ pub async fn mint_enrollment_token(
                     "expires_at": issued.record.expires_at.to_rfc3339(),
                     "single_use": issued.record.single_use,
                     "ttl_seconds": ttl_seconds,
+                    "client": client.to_value(),
                 })),
         )
         .await?;
@@ -321,10 +737,12 @@ fn clamp_enrollment_token_ttl(requested: u32) -> u32 {
 /// `GET /api/v1/admin/ca/{id}/retirement` — whether a CA can be safely retired.
 pub async fn retirement(
     State(state): State<AppState>,
-    BearerToken(token): BearerToken,
     Path(id): Path<String>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
+    BearerToken(token): BearerToken,
 ) -> Result<Json<RetirementAssessment>, ApiError> {
-    authorize_admin(&state, &token, "ca.retirement").await?;
+    authorize_admin(&state, &headers, &request_id, &token, "ca.retirement").await?;
     let service = require_bundle(&state)?;
     let now = state.clock().now();
     let assessment = service.assess_retirement(&id, now).await?;
@@ -340,11 +758,13 @@ pub async fn retirement(
 /// retirement records `ca.retired`. Keys are never silently removed.
 pub async fn retire(
     State(state): State<AppState>,
-    BearerToken(token): BearerToken,
     Path(id): Path<String>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
+    BearerToken(token): BearerToken,
     request: Option<Json<RetireCaRequest>>,
-) -> Result<Json<CaRecord>, ApiError> {
-    let identity = authorize_admin(&state, &token, "ca.retire").await?;
+) -> Result<Json<CaView>, ApiError> {
+    let identity = authorize_admin(&state, &headers, &request_id, &token, "ca.retire").await?;
     let ca = require_ca(&state)?;
     let service = require_bundle(&state)?;
     let force = request.map(|Json(r)| r.force).unwrap_or_default();
@@ -363,6 +783,8 @@ pub async fn retire(
         audit_retirement(
             &state,
             &identity,
+            &headers,
+            &request_id,
             "ca.retirement.denied",
             &assessment,
             false,
@@ -383,24 +805,33 @@ pub async fn retire(
             affected = assessment.affected_machines,
             "ca retirement FORCED despite dependent machines",
         );
-        audit_retirement(&state, &identity, "ca.retirement.forced", &assessment, true).await?;
+        audit_retirement(
+            &state,
+            &identity,
+            &headers,
+            &request_id,
+            "ca.retirement.forced",
+            &assessment,
+            true,
+        )
+        .await?;
     }
 
     let record = ca.retire(&id).await?;
-    state
-        .audit()
-        .append_audit_event(
-            NewAuditEntry::new("ca.retired", identity.username.clone())
-                .with_subject(record.key_id.clone())
-                .with_metadata(json!({
-                    "id": record.id,
-                    "fingerprint": record.fingerprint,
-                    "forced": !assessment.safe,
-                    "affected_machines": assessment.affected_machines,
-                })),
-        )
-        .await?;
-    Ok(Json(record))
+    audit_ca(
+        &state,
+        &identity,
+        &headers,
+        &request_id,
+        "ca.retired",
+        &record,
+        Some(json!({
+            "forced": !assessment.safe,
+            "affected_machines": assessment.affected_machines,
+        })),
+    )
+    .await?;
+    Ok(Json(view(&state, &record)))
 }
 
 /// The bundle distribution service, or a 500 if the server lacks a CA manager
@@ -413,10 +844,30 @@ fn require_bundle(state: &AppState) -> Result<BundleService, ApiError> {
     })
 }
 
-/// Append a fail-closed audit event for a retirement decision.
+/// Project a record into a [`CaView`] as of now with the current generation.
+fn view(state: &AppState, record: &CaRecord) -> CaView {
+    let generation = state.ca().map(|ca| ca.generation()).unwrap_or(0);
+    CaView::from_record(record, generation, state.clock().now())
+}
+
+/// Build the privacy-preserving client-context block for an audit entry.
+fn client_context(
+    state: &AppState,
+    identity: &Identity,
+    headers: &HeaderMap,
+    request_id: &RequestId,
+) -> serde_json::Value {
+    RequestAuditContext::from_headers(headers, Some(request_id.as_str()), state.clock().now())
+        .with_provider(identity.provider.clone())
+        .to_value()
+}
+
+/// Append a fail-closed audit event for a retirement/delete decision.
 async fn audit_retirement(
     state: &AppState,
     identity: &Identity,
+    headers: &HeaderMap,
+    request_id: &RequestId,
     action: &str,
     assessment: &RetirementAssessment,
     forced: bool,
@@ -433,15 +884,21 @@ async fn audit_retirement(
                     "latest_generation": assessment.latest_generation,
                     "forced": forced,
                     "reason": assessment.reason,
+                    "provider": identity.provider,
+                    "subject": identity.subject,
+                    "client": client_context(state, identity, headers, request_id),
                 })),
         )
         .await?;
     Ok(())
 }
 
-/// Resolve and authorize an admin caller (deny-by-default), auditing denials.
+/// Resolve and authorize an admin caller (deny-by-default), auditing denials
+/// with operator identity + privacy-preserving client context.
 async fn authorize_admin(
     state: &AppState,
+    headers: &HeaderMap,
+    request_id: &RequestId,
     token: &str,
     action: &str,
 ) -> Result<Identity, ApiError> {
@@ -459,7 +916,12 @@ async fn authorize_admin(
             .append_audit_event(
                 NewAuditEntry::new("ca.admin_denied", identity.username.clone())
                     .with_subject(action.to_string())
-                    .with_metadata(json!({ "reason": reason })),
+                    .with_metadata(json!({
+                        "reason": reason,
+                        "provider": identity.provider,
+                        "subject": identity.subject,
+                        "client": client_context(state, &identity, headers, request_id),
+                    })),
             )
             .await?;
         return Err(AuthzError::Denied { reason }.into());
@@ -475,23 +937,38 @@ fn require_ca(state: &AppState) -> Result<Arc<CaManager>, ApiError> {
 }
 
 /// Append a fail-closed audit event for a CA lifecycle change. The metadata
-/// never includes key material or passphrases.
-async fn audit_lifecycle(
+/// never includes key material or passphrases; it records the operator identity
+/// and the privacy-preserving client context (ADR-0023).
+async fn audit_ca(
     state: &AppState,
     identity: &Identity,
+    headers: &HeaderMap,
+    request_id: &RequestId,
     action: &str,
     record: &CaRecord,
+    extra: Option<serde_json::Value>,
 ) -> Result<(), ApiError> {
+    let mut metadata = json!({
+        "id": record.id,
+        "fingerprint": record.fingerprint,
+        "enabled": record.enabled,
+        "provider": identity.provider,
+        "subject": identity.subject,
+        "client": client_context(state, identity, headers, request_id),
+    });
+    if let Some(extra) = extra {
+        if let (Some(obj), Some(extra_obj)) = (metadata.as_object_mut(), extra.as_object()) {
+            for (k, v) in extra_obj {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+    }
     state
         .audit()
         .append_audit_event(
             NewAuditEntry::new(action, identity.username.clone())
                 .with_subject(record.key_id.clone())
-                .with_metadata(json!({
-                    "id": record.id,
-                    "fingerprint": record.fingerprint,
-                    "enabled": record.enabled,
-                })),
+                .with_metadata(metadata),
         )
         .await?;
     Ok(())

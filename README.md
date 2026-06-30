@@ -59,8 +59,22 @@ Startup fails fast (closed) if there are more than 64 CAs, if any key id /
 public key / fingerprint is duplicated, if a key is undecryptable or not
 Ed25519, or if CAs exist but none is enabled.
 
-Manage CAs at runtime through the admin API (deny-by-default, same authorization
-as certificate issuance):
+Manage CAs at runtime with the **`mayfly ca` CLI** — the primary (and only
+required) operator interface for CA administration. No manual REST calls are
+needed; see `mayfly-cli/docs/ca.md` and `mayfly-cli/docs/rotation.md`.
+
+```bash
+# Generate, list, inspect, rotate, and retire CAs — all from the CLI.
+export MAYFLY_CA_PASSPHRASE='a-strong-storage-passphrase'
+mayfly ca create ca-2026-q3
+mayfly ca list                 # -o wide|json|yaml; --watch
+mayfly ca rotate               # guided rotation: new CA + fleet rollout + warnings
+mayfly ca disable <id> && mayfly ca retire <id> --yes
+```
+
+The CLI is a thin client of the deny-by-default, audited admin API (same
+authorization as certificate issuance). The equivalent REST calls remain
+available for automation:
 
 ```bash
 # Generate a new CA (passphrase must match the storage passphrase).
@@ -132,13 +146,20 @@ All endpoints are served under the `/api/v1` prefix.
 | `GET`  | `/auth/whoami`              | Bearer      | Resolve the identity behind a token (optional `?provider=`). |
 | `POST` | `/certificates/issue`       | Bearer      | Authenticate, authorize, and sign an SSH certificate.|
 | `GET`  | `/certificates/validate`    | none        | Validate a certificate against the CA.               |
-| `POST` | `/admin/ca/generate`        | Bearer      | Generate a new encrypted Ed25519 CA.                 |
-| `POST` | `/admin/ca/import`          | Bearer      | Import an existing encrypted Ed25519 CA key.         |
-| `GET`  | `/admin/ca`                 | Bearer      | List metadata for all managed CAs.                   |
+| `POST` | `/admin/ca/generate`        | Bearer      | Generate a new encrypted Ed25519 CA (→ `CaView`).    |
+| `POST` | `/admin/ca/import`          | Bearer      | Import an existing encrypted Ed25519 CA key (→ `CaView`). |
+| `POST` | `/admin/ca/rotate`          | Bearer      | Guided rotation: generate a new CA + report fleet rollout (→ `RotationResult`). |
+| `GET`  | `/admin/ca`                 | Bearer      | List metadata for all managed CAs (→ `CaView[]`).    |
+| `GET`  | `/admin/ca/stats`           | Bearer      | Aggregate signing statistics (issued counts per CA). |
+| `GET`  | `/admin/ca/bundle`          | Bearer      | The current public trust bundle (active CAs).        |
 | `GET`  | `/admin/ca/{id}`            | Bearer      | Detailed metadata for one CA (never the private key).|
-| `PATCH`| `/admin/ca/{id}`            | Bearer      | Enable, disable, or rename a CA.                     |
+| `GET`  | `/admin/ca/{id}/public-key` | Bearer      | Export one CA's public key + fingerprint.            |
+| `PATCH`| `/admin/ca/{id}`            | Bearer      | Enable, disable, or rename a CA (→ `CaView`).         |
+| `POST` | `/admin/ca/{id}/enable`     | Bearer      | Enable a CA (add to signing set + bundle).           |
+| `POST` | `/admin/ca/{id}/disable`    | Bearer      | Disable a CA (remove from signing set + bundle).     |
 | `GET`  | `/admin/ca/{id}/retirement` | Bearer      | Whether a (disabled) CA can be safely retired.       |
 | `POST` | `/admin/ca/{id}/retire`     | Bearer      | Permanently retire a disabled CA (`{"force": true}` to override). |
+| `DELETE`| `/admin/ca/{id}`           | Bearer      | Delete an unused (disabled, safe) CA (`?force=true` to override). |
 | `GET`  | `/admin/bundle/status`      | Bearer      | Fleet rollout metrics (liveness + machines per generation). |
 | `POST` | `/admin/machines/enrollment-tokens` | Bearer | Mint a single-use enrollment token (TTL 60s–24h).        |
 | `GET`  | `/admin/machines`           | Bearer      | List enrolled machines (filterable; derived liveness + up-to-date). |
@@ -265,6 +286,43 @@ curl -sk -X POST https://127.0.0.1:8443/api/v1/admin/machines/<id>/disable \
 curl -sk -X POST https://127.0.0.1:8443/api/v1/admin/machines/<id>/rotate-identity \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+### CA administration
+
+The `/admin/ca` endpoints are the complete control plane for the SSH User CAs
+and back the `mayfly ca` CLI (the only interface an operator needs — no manual
+REST calls are required). All are **Bearer-authenticated and authorized with the
+same deny-by-default policy** as certificate issuance.
+
+- **List / show / stats / bundle** project a rich, presentation-neutral `CaView`
+  (an **additive superset** of the stored `CaRecord`: same field names plus
+  derived `status`, `in_current_bundle`, `age_seconds`, `bundle_generation`, and
+  a synthesized `activation_history` built from the record's own timestamps).
+  Private key material is never returned; `public-key`/`bundle` emit public keys
+  and fingerprints only.
+- **Lifecycle** — `generate`/`import` add CAs; `enable`/`disable` (and `PATCH`)
+  move a CA in and out of the signing set + trust bundle (bumping the
+  generation); `retire` destroys a disabled CA's key material but keeps its audit
+  row; `delete` removes a disabled CA's row **and** key file.
+- **Rotation** — `POST /admin/ca/rotate` performs the safe first step of a
+  rotation: it generates a new enabled CA and returns a `RotationResult` with the
+  previous active CA(s), fleet rollout metrics, and warnings. It deliberately
+  does **not** retire the predecessor — the old CA stays active during overlap
+  until the pull-based fleet converges on the new generation.
+- **Safety (fail-closed `409`)** — an active CA cannot be deleted; the last
+  enabled CA cannot be disabled and retire/delete require a disabled CA (so the
+  bundle is never emptied); duplicate fingerprints/keys are refused on import;
+  non-Ed25519/unparseable keys can never enter the signing set. `retire`/`delete`
+  are dependency-gated (`force` to override, which is loudly audited).
+
+Auditing: every **mutation** (`ca.generated`/`imported`/`renamed`/`enabled`/
+`disabled`/`rotated`/`retired`/`deleted` and the `*.denied`/`*.forced` variants)
+and every **authorization denial** (`ca.admin_denied`) appends a fail-closed,
+hash-chained audit entry recording the **operator identity** and
+privacy-preserving **client context**. Reads (`list`/`get`/`stats`/`bundle`/
+`public-key`/`retirement`/`status`) are authorized but intentionally not audited,
+so CLI `--watch` polling cannot flood the audit log. Passphrases and private key
+material are never logged, audited, or returned.
 
 ## Configuration reference
 

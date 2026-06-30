@@ -21,12 +21,14 @@
 //! Nothing outside [`CaManager`] iterates over CA keys or knows where they are
 //! stored.
 
+pub mod admin;
 pub mod errors;
 pub mod manager;
 pub mod models;
 pub mod service;
 pub mod store;
 
+pub use admin::{CaActivationEvent, CaStats, CaUsage, CaView, RotationResult};
 pub use errors::CaError;
 pub use manager::{CaManager, OsRandom, RandomSource};
 pub use models::{

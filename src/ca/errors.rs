@@ -87,6 +87,14 @@ pub enum CaError {
         key_id: String,
     },
 
+    /// Deleting an enabled CA is refused: it must be disabled first so the
+    /// bundle stops advertising the key before its row and material are removed.
+    #[error("cannot delete ca '{key_id}': it is still active (disable it first)")]
+    CannotDeleteActive {
+        /// The key id that was asked to be deleted.
+        key_id: String,
+    },
+
     /// Two keys share the same `key_id`.
     #[error("duplicate ca key id '{0}'")]
     DuplicateKeyId(String),
@@ -174,7 +182,8 @@ impl From<CaError> for ApiError {
             | CaError::DuplicatePublicKey { .. }
             | CaError::DuplicateFingerprint { .. }
             | CaError::CannotDisableLast { .. }
-            | CaError::CannotRetireEnabled { .. } => ApiError::Conflict(err.to_string()),
+            | CaError::CannotRetireEnabled { .. }
+            | CaError::CannotDeleteActive { .. } => ApiError::Conflict(err.to_string()),
             // Everything else is a server/config failure; cause is logged only.
             other => ApiError::Internal(anyhow::Error::new(other)),
         }

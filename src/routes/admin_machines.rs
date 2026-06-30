@@ -71,8 +71,7 @@ impl MachineListQuery {
                 .ok_or_else(|| ApiError::BadRequest(format!("unknown status '{v}'")))
         })?;
         let liveness = parse_opt(self.liveness, |v| {
-            parse_liveness(v)
-                .ok_or_else(|| ApiError::BadRequest(format!("unknown liveness '{v}'")))
+            parse_liveness(v).ok_or_else(|| ApiError::BadRequest(format!("unknown liveness '{v}'")))
         })?;
         Ok(MachineFilter {
             status,

@@ -57,10 +57,33 @@ pub fn build_router(state: AppState) -> Router {
             post(admin::generate),
         )
         .route(&format!("{API_V1}/admin/ca/import"), post(admin::import))
+        // Guided rotation: generate a new CA + report rollout (013B).
+        .route(&format!("{API_V1}/admin/ca/rotate"), post(admin::rotate))
         .route(&format!("{API_V1}/admin/ca"), get(admin::list))
+        // Static read endpoints must precede `{id}`; axum 0.8 matchit gives
+        // static segments priority over params, so order is not significant.
+        .route(&format!("{API_V1}/admin/ca/stats"), get(admin::stats))
+        .route(
+            &format!("{API_V1}/admin/ca/bundle"),
+            get(admin::public_bundle),
+        )
         .route(
             &format!("{API_V1}/admin/ca/{{id}}"),
-            get(admin::get_one).patch(admin::patch),
+            get(admin::get_one)
+                .patch(admin::patch)
+                .delete(admin::delete_ca),
+        )
+        .route(
+            &format!("{API_V1}/admin/ca/{{id}}/public-key"),
+            get(admin::export_public_key),
+        )
+        .route(
+            &format!("{API_V1}/admin/ca/{{id}}/enable"),
+            post(admin::enable),
+        )
+        .route(
+            &format!("{API_V1}/admin/ca/{{id}}/disable"),
+            post(admin::disable),
         )
         .route(
             &format!("{API_V1}/admin/ca/{{id}}/retirement"),
