@@ -78,6 +78,13 @@ pub struct Machine {
     pub ip: Option<String>,
     /// Last self-reported configuration generation, set on heartbeat.
     pub current_generation: i64,
+    /// The CA-bundle generation the agent last *successfully applied* (set by the
+    /// bundle ack path). `None` until the first successful sync.
+    pub synced_generation: Option<i64>,
+    /// Fingerprint of the bundle the agent last applied. `None` until first sync.
+    pub bundle_fingerprint: Option<String>,
+    /// When the agent last successfully applied a bundle, if ever.
+    pub last_sync: Option<DateTime<Utc>>,
     /// When the machine was last seen via heartbeat, if ever.
     pub last_seen: Option<DateTime<Utc>>,
     /// When enrollment completed.

@@ -14,6 +14,7 @@
 //! - [`service`] — the single-transaction enrollment flow.
 //! - [`errors`] — [`EnrollmentError`] and its HTTP representation.
 
+pub mod admin;
 pub mod errors;
 pub mod models;
 pub mod protocol;
@@ -22,6 +23,7 @@ pub mod service;
 pub mod token;
 pub mod validation;
 
+pub use admin::{MachineAdminError, MachineAdminService, MachineFilter, MachineView};
 pub use errors::EnrollmentError;
 pub use models::{
     EnrollRequest, EnrollResponse, EnrollmentToken, IssuedEnrollmentToken, Machine, MachineStatus,

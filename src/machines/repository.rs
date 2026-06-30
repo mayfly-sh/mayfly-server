@@ -82,6 +82,30 @@ pub trait MachineRepository: Send + Sync {
         conn: &mut SqliteConnection,
         limit: i64,
     ) -> Result<Vec<Machine>, sqlx::Error>;
+
+    /// List every machine ordered by hostname (deterministic admin listing).
+    async fn list_all(&self, conn: &mut SqliteConnection) -> Result<Vec<Machine>, sqlx::Error>;
+
+    /// Set a machine's lifecycle `status` (and bump `updated_at`).
+    ///
+    /// Returns `true` if a row was updated, `false` if no machine matched. This
+    /// is the only write path for `status` outside enrollment; liveness is never
+    /// stored here.
+    async fn update_status(
+        &self,
+        conn: &mut SqliteConnection,
+        machine_id: &str,
+        status: MachineStatus,
+        now: DateTime<Utc>,
+    ) -> Result<bool, sqlx::Error>;
+
+    /// Permanently delete a machine row. Returns `true` if a row was removed.
+    /// Audit history (a separate append-only log) is unaffected.
+    async fn delete(
+        &self,
+        conn: &mut SqliteConnection,
+        machine_id: &str,
+    ) -> Result<bool, sqlx::Error>;
 }
 
 /// The mutable fields a heartbeat refreshes on a machine row.
@@ -150,6 +174,9 @@ struct MachineRow {
     status: String,
     ip: Option<String>,
     current_generation: i64,
+    synced_generation: Option<i64>,
+    bundle_fingerprint: Option<String>,
+    last_sync: Option<String>,
     last_seen: Option<String>,
     enrolled_at: String,
     created_at: String,
@@ -164,6 +191,7 @@ impl TryFrom<MachineRow> for Machine {
             sqlx::Error::Decode(format!("unknown machine status '{}'", row.status).into())
         })?;
         let last_seen = row.last_seen.as_deref().map(parse_dt).transpose()?;
+        let last_sync = row.last_sync.as_deref().map(parse_dt).transpose()?;
         Ok(Machine {
             machine_id: row.machine_id,
             hostname: row.hostname,
@@ -174,6 +202,9 @@ impl TryFrom<MachineRow> for Machine {
             status,
             ip: row.ip,
             current_generation: row.current_generation,
+            synced_generation: row.synced_generation,
+            bundle_fingerprint: row.bundle_fingerprint,
+            last_sync,
             last_seen,
             enrolled_at: parse_dt(&row.enrolled_at)?,
             created_at: parse_dt(&row.created_at)?,
@@ -183,7 +214,8 @@ impl TryFrom<MachineRow> for Machine {
 }
 
 const MACHINE_COLUMNS: &str = "machine_id, hostname, public_key, os, arch, agent_version, \
-     status, ip, current_generation, last_seen, enrolled_at, created_at, updated_at";
+     status, ip, current_generation, synced_generation, bundle_fingerprint, last_sync, \
+     last_seen, enrolled_at, created_at, updated_at";
 
 #[async_trait]
 impl MachineRepository for SqliteMachineRepository {
@@ -266,6 +298,9 @@ impl MachineRepository for SqliteMachineRepository {
             status: new.status,
             ip: None,
             current_generation: 0,
+            synced_generation: None,
+            bundle_fingerprint: None,
+            last_sync: None,
             last_seen: None,
             enrolled_at: new.enrolled_at,
             created_at: new.enrolled_at,
@@ -308,6 +343,45 @@ impl MachineRepository for SqliteMachineRepository {
         .fetch_all(&mut *conn)
         .await?;
         rows.into_iter().map(Machine::try_from).collect()
+    }
+
+    async fn list_all(&self, conn: &mut SqliteConnection) -> Result<Vec<Machine>, sqlx::Error> {
+        let rows = sqlx::query_as::<_, MachineRow>(&format!(
+            "SELECT {MACHINE_COLUMNS} FROM machines ORDER BY hostname ASC"
+        ))
+        .fetch_all(&mut *conn)
+        .await?;
+        rows.into_iter().map(Machine::try_from).collect()
+    }
+
+    async fn update_status(
+        &self,
+        conn: &mut SqliteConnection,
+        machine_id: &str,
+        status: MachineStatus,
+        now: DateTime<Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        let now_text = to_text(now);
+        let result =
+            sqlx::query("UPDATE machines SET status = ?, updated_at = ? WHERE machine_id = ?")
+                .bind(status.as_str())
+                .bind(&now_text)
+                .bind(machine_id)
+                .execute(&mut *conn)
+                .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn delete(
+        &self,
+        conn: &mut SqliteConnection,
+        machine_id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM machines WHERE machine_id = ?")
+            .bind(machine_id)
+            .execute(&mut *conn)
+            .await?;
+        Ok(result.rows_affected() == 1)
     }
 }
 

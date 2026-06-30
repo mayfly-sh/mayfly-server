@@ -140,6 +140,16 @@ All endpoints are served under the `/api/v1` prefix.
 | `GET`  | `/admin/ca/{id}/retirement` | Bearer      | Whether a (disabled) CA can be safely retired.       |
 | `POST` | `/admin/ca/{id}/retire`     | Bearer      | Permanently retire a disabled CA (`{"force": true}` to override). |
 | `GET`  | `/admin/bundle/status`      | Bearer      | Fleet rollout metrics (liveness + machines per generation). |
+| `POST` | `/admin/machines/enrollment-tokens` | Bearer | Mint a single-use enrollment token (TTL 60s–24h).        |
+| `GET`  | `/admin/machines`           | Bearer      | List enrolled machines (filterable; derived liveness + up-to-date). |
+| `GET`  | `/admin/machines/{id}`      | Bearer      | One machine's full detail.                           |
+| `POST` | `/admin/machines/{id}/approve` | Bearer   | Approve a pending machine (`pending → active`).      |
+| `POST` | `/admin/machines/{id}/disable` | Bearer   | Disable a machine (blocked until re-enabled).        |
+| `POST` | `/admin/machines/{id}/enable`  | Bearer   | Re-enable a disabled machine.                        |
+| `POST` | `/admin/machines/{id}/revoke`  | Bearer   | Revoke a machine (permanently blocked).              |
+| `DELETE`| `/admin/machines/{id}`     | Bearer      | Permanently delete a machine record.                 |
+| `POST` | `/admin/machines/{id}/reenroll` | Bearer  | Revoke + mint a fresh single-use enrollment token.   |
+| `POST` | `/admin/machines/{id}/rotate-identity` | Bearer | Rotate identity (revoke + new enrollment token). |
 | `POST` | `/machines/enroll`          | Token       | Enroll an agent; returns intervals + Bundle Signing Key to pin. |
 | `POST` | `/agent/heartbeat`          | Ed25519 sig | Agent liveness heartbeat.                            |
 | `GET`  | `/agent/ca-bundle`          | Ed25519 sig | Fetch the current **signed** CA bundle (ETag / `304`).|
@@ -213,6 +223,48 @@ curl -sk -X POST https://127.0.0.1:8443/api/v1/certificates/issue \
 
 The response contains the OpenSSH-formatted certificate, its serial, principal,
 fingerprint, effective TTL, and validity window.
+
+### Machine administration
+
+The `/admin/machines` endpoints are the control plane for the enrolled fleet and
+back the `mayfly machine` CLI (the primary operator interface — no manual REST
+calls are required). All of them are **Bearer-authenticated and authorized with
+the same deny-by-default policy** as the CA admin API.
+
+- **List / show** project a rich, presentation-neutral view of each machine,
+  including derived `liveness` (`online`/`stale`/`offline`) and `up_to_date`
+  (synced generation vs. the latest CA generation). `GET /admin/machines`
+  filters server-side by `status`, `liveness`, `hostname` (substring),
+  `generation`, `os`, `arch`, and `agent_version`.
+- **Lifecycle** — `approve`/`enable` set a machine `active`; `disable` and
+  `revoke` block it; `delete` removes the record. Because agents are pull-based,
+  these take effect at the per-request authentication gate: a machine that is not
+  `active` (or no longer exists) has its next signed request rejected, so it stops
+  converging immediately — without any change to the agent.
+- **Re-enroll / rotate-identity** delete the existing machine (freeing its
+  hostname and key) and return a fresh **single-use enrollment token**; applying
+  it on the host enrolls a brand-new keypair, which is exactly an identity
+  rotation. The old identity is dead the moment the call returns.
+
+Auditing: every **mutation** (`machine.approved`/`disabled`/`enabled`/`revoked`/
+`deleted`/`reenroll_requested`/`identity_rotation_requested`) and every
+**authorization denial** (`machine.admin_denied`) appends a fail-closed,
+hash-chained audit entry recording the **operator identity** and
+privacy-preserving **client context**. Read operations (`list`/`get`) are
+authorized but intentionally not audited, so CLI `--watch` polling cannot flood
+the audit log.
+
+```bash
+# List active machines that are offline (operator Bearer token required).
+curl -sk "https://127.0.0.1:8443/api/v1/admin/machines?status=active&liveness=offline" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Disable, then rotate a machine's identity (returns a single-use token).
+curl -sk -X POST https://127.0.0.1:8443/api/v1/admin/machines/<id>/disable \
+  -H "Authorization: Bearer $TOKEN"
+curl -sk -X POST https://127.0.0.1:8443/api/v1/admin/machines/<id>/rotate-identity \
+  -H "Authorization: Bearer $TOKEN"
+```
 
 ## Configuration reference
 

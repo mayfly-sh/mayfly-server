@@ -5,6 +5,7 @@
 //! health and readiness endpoints exist at this stage.
 
 pub mod admin;
+pub mod admin_machines;
 pub mod agent;
 pub mod auth;
 pub mod ca_bundle;
@@ -78,6 +79,42 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             &format!("{API_V1}/admin/machines/enrollment-tokens"),
             post(admin::mint_enrollment_token),
+        )
+        // Machine administration admin API (013A). Same deny-by-default authz as
+        // the CA admin API; mutations are audited; reads are not. The static
+        // `enrollment-tokens` segment above takes priority over `{id}` (axum 0.8
+        // matchit: static beats param).
+        .route(
+            &format!("{API_V1}/admin/machines"),
+            get(admin_machines::list_machines),
+        )
+        .route(
+            &format!("{API_V1}/admin/machines/{{id}}"),
+            get(admin_machines::get_machine).delete(admin_machines::delete_machine),
+        )
+        .route(
+            &format!("{API_V1}/admin/machines/{{id}}/approve"),
+            post(admin_machines::approve),
+        )
+        .route(
+            &format!("{API_V1}/admin/machines/{{id}}/disable"),
+            post(admin_machines::disable),
+        )
+        .route(
+            &format!("{API_V1}/admin/machines/{{id}}/enable"),
+            post(admin_machines::enable),
+        )
+        .route(
+            &format!("{API_V1}/admin/machines/{{id}}/revoke"),
+            post(admin_machines::revoke),
+        )
+        .route(
+            &format!("{API_V1}/admin/machines/{{id}}/reenroll"),
+            post(admin_machines::reenroll),
+        )
+        .route(
+            &format!("{API_V1}/admin/machines/{{id}}/rotate-identity"),
+            post(admin_machines::rotate_identity),
         )
         // The heartbeat route is gated by the Ed25519 signature middleware via
         // `route_layer`, so only that endpoint requires a signed request.

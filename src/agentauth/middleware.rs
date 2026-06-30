@@ -25,7 +25,7 @@ use axum::{
 };
 
 use crate::errors::ApiError;
-use crate::machines::models::Machine;
+use crate::machines::models::{Machine, MachineStatus};
 use crate::machines::repository::{MachineRepository, SqliteMachineRepository};
 use crate::state::AppState;
 
@@ -126,6 +126,21 @@ pub async fn verify_machine_signature(
         signing::canonical_string(&machine_id, timestamp, &nonce, &method, &path, &body_hash);
     if let Err(err) = signing::verify_signature(&machine.public_key, &canonical, &signature) {
         tracing::debug!(%machine_id, reason = %err, "signed request failed signature check");
+        return Err(reject());
+    }
+
+    // (5b) Lifecycle gate (deny-by-default): only an ACTIVE machine may act.
+    // A disabled/revoked/pending machine is rejected here — this is how the
+    // operator `machine disable`/`revoke` lifecycle takes effect on the agent's
+    // next signed request without any agent change (ADR-0022). The check runs
+    // after signature verification so only an authenticated machine learns its
+    // state, and the rejection is the same generic 401 (no status enumeration).
+    if machine.status != MachineStatus::Active {
+        tracing::debug!(
+            %machine_id,
+            status = machine.status.as_str(),
+            "signed request from a non-active machine rejected",
+        );
         return Err(reject());
     }
 
