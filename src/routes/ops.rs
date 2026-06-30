@@ -679,7 +679,11 @@ fn parse_time(value: Option<String>, field: &str) -> Result<Option<DateTime<Utc>
 /// Resolve and authorize an admin caller (deny-by-default), auditing denials
 /// with operator identity + privacy-preserving client context. Reads that pass
 /// authorization are intentionally not audited.
-async fn authorize_admin(
+///
+/// Shared by the operational console (013C) and the rollout console (013D) so
+/// every read-only admin endpoint enforces — and audits denials for —
+/// authorization identically.
+pub(crate) async fn authorize_admin(
     state: &AppState,
     headers: &HeaderMap,
     request_id: &RequestId,

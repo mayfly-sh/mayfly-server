@@ -176,6 +176,14 @@ All endpoints are served under the `/api/v1` prefix.
 | `GET`  | `/admin/health`             | Bearer      | Rolled-up fleet health (status, machines, rollout, certificate/auth activity, bundle, audit). |
 | `GET`  | `/admin/status`             | Bearer      | Cluster/system status (version, uptime, CA inventory, bundle generation, API summary). |
 | `GET`  | `/admin/metrics`            | Bearer      | In-memory API request statistics + per-route timings (ephemeral telemetry). |
+| `GET`  | `/admin/rollout`            | Bearer      | Fleet rollout status: progress, completion %, ETA, breakdown, generations, health. |
+| `GET`  | `/admin/rollout/generations`| Bearer      | Machine population per CA generation.                |
+| `GET`  | `/admin/rollout/machines`   | Bearer      | Per-machine rollout state (`?state=all\|current\|lagging\|stuck`, `?generation=`). |
+| `GET`  | `/admin/rollout/stuck`      | Bearer      | Stuck machines + per-machine retry recommendation.  |
+| `GET`  | `/admin/rollout/health`     | Bearer      | Rollout health score (`Healthy\|Degraded\|Blocked\|Failed`) + reasons. |
+| `GET`  | `/admin/rollout/explain`    | Bearer      | Categorized explanation of why the rollout is incomplete. |
+| `GET`  | `/admin/rollout/timeline`   | Bearer      | Recent bundle rollout events (`?limit=`, max 500).  |
+| `GET`  | `/admin/rollout/history`    | Bearer      | Generation adoption history (population + apply timestamps). |
 | `POST` | `/machines/enroll`          | Token       | Enroll an agent; returns intervals + Bundle Signing Key to pin. |
 | `POST` | `/agent/heartbeat`          | Ed25519 sig | Agent liveness heartbeat.                            |
 | `GET`  | `/agent/ca-bundle`          | Ed25519 sig | Fetch the current **signed** CA bundle (ETag / `304`).|
@@ -357,6 +365,34 @@ Like the other admin reads, these endpoints are authorized but **not** audited
 (so polling/streaming cannot flood the chain); only an **authorization denial**
 (`ops.admin_denied`) is recorded. Audit metadata returned to the CLI never
 contains secrets, tokens, private keys, or full certificates.
+
+### Fleet rollout console (`/admin/rollout*`)
+
+The `/admin/rollout*` endpoints back `mayfly rollout` — the operator console for
+observing and managing CA-bundle rollouts (ADR-0025). The `rollout` module is a
+**read-only composition** over existing subsystems: machine views
+(`MachineAdminService`), the CA generation counter (`CaManager`), and the
+append-only audit log's `bundle.*` events (`bundle.downloaded`/`applied`/
+`rollback`/`signature_failed`). It introduces **no persistence, no write path,
+and no migration**.
+
+- **Status** (`GET /admin/rollout`) reports completion over **active** machines,
+  a healthy/pending/stale/offline/failed breakdown, per-generation population, a
+  transparent **ETA** (recent apply rate ÷ remaining), and an embedded health
+  verdict.
+- **Health** (`GET /admin/rollout/health`) scores the rollout
+  `Healthy`/`Degraded`/`Blocked`/`Failed` with reasons (signature failures →
+  `Failed`; all-remaining-offline → `Blocked`).
+- **Explain** (`GET /admin/rollout/explain`) and **stuck**
+  (`GET /admin/rollout/stuck`) categorize each not-up-to-date machine
+  (offline / heartbeat stale / helper failure / bundle verification failure /
+  generation mismatch / disabled / revoked) and give a recommended action.
+- **Generations / machines / timeline / history** drill into the per-generation
+  population, per-machine state (filterable), recent events, and adoption over
+  time.
+
+Same posture as the operational console: Bearer + deny-by-default, reads
+**un-audited** (only `ops.admin_denied` on denial), no secrets in any response.
 
 ## Configuration reference
 

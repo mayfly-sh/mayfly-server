@@ -23,6 +23,7 @@ pub mod logging;
 pub mod machines;
 pub mod ops;
 pub mod request_id;
+pub mod rollout;
 pub mod routes;
 pub mod secret;
 pub mod server;

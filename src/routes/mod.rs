@@ -14,6 +14,7 @@ pub mod health;
 pub mod machines;
 pub mod ops;
 pub mod ready;
+pub mod rollout;
 pub mod servers;
 
 use axum::{
@@ -151,6 +152,41 @@ pub fn build_router(state: AppState) -> Router {
         .route(&format!("{API_V1}/admin/health"), get(ops::health))
         .route(&format!("{API_V1}/admin/status"), get(ops::status))
         .route(&format!("{API_V1}/admin/metrics"), get(ops::metrics))
+        // Fleet rollout console (013D): read-only rollout status, per-generation
+        // breakdown, per-machine views, stuck machines, health scoring, explain,
+        // timeline, and generation history. Same deny-by-default authz as the
+        // operational console; reads are not audited (only denials are). Static
+        // sub-paths precede the bare `/rollout` route; axum 0.8 matchit gives
+        // static segments priority, so order is not significant.
+        .route(&format!("{API_V1}/admin/rollout"), get(rollout::status))
+        .route(
+            &format!("{API_V1}/admin/rollout/generations"),
+            get(rollout::generations),
+        )
+        .route(
+            &format!("{API_V1}/admin/rollout/machines"),
+            get(rollout::machines),
+        )
+        .route(
+            &format!("{API_V1}/admin/rollout/stuck"),
+            get(rollout::stuck),
+        )
+        .route(
+            &format!("{API_V1}/admin/rollout/health"),
+            get(rollout::health),
+        )
+        .route(
+            &format!("{API_V1}/admin/rollout/explain"),
+            get(rollout::explain),
+        )
+        .route(
+            &format!("{API_V1}/admin/rollout/timeline"),
+            get(rollout::timeline),
+        )
+        .route(
+            &format!("{API_V1}/admin/rollout/history"),
+            get(rollout::history),
+        )
         // The heartbeat route is gated by the Ed25519 signature middleware via
         // `route_layer`, so only that endpoint requires a signed request.
         .merge(signed_agent_routes(state.clone()))
