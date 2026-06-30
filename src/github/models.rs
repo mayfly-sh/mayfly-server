@@ -110,6 +110,25 @@ pub struct DevicePollRequest {
     pub device_code: String,
 }
 
+/// Provider-agnostic identity echoed to the client on an approved poll, so the
+/// CLI can persist the authenticated identity for any provider without a
+/// GitHub-specific `whoami` call. Contains no secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PollIdentity {
+    /// Provider id that authenticated the identity.
+    pub provider: String,
+    /// Stable, provider-unique subject.
+    pub subject: String,
+    /// Human username/login.
+    pub username: String,
+    /// Email, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Display name, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 /// Response for `POST /api/v1/auth/device/poll`.
 #[derive(Debug, Clone, Serialize)]
 pub struct PollResponse {
@@ -118,6 +137,9 @@ pub struct PollResponse {
     /// Present only when `status == "approved"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_token: Option<String>,
+    /// Present (best-effort) when `status == "approved"` and identity resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<PollIdentity>,
 }
 
 impl PollResponse {
@@ -126,14 +148,25 @@ impl PollResponse {
         Self {
             status,
             access_token: None,
+            identity: None,
         }
     }
 
-    /// An approved response carrying the access token.
+    /// An approved response carrying the access token (no identity).
     pub fn approved(access_token: String) -> Self {
         Self {
             status: "approved",
             access_token: Some(access_token),
+            identity: None,
+        }
+    }
+
+    /// An approved response carrying the access token and resolved identity.
+    pub fn approved_with(access_token: String, identity: Option<PollIdentity>) -> Self {
+        Self {
+            status: "approved",
+            access_token: Some(access_token),
+            identity,
         }
     }
 }

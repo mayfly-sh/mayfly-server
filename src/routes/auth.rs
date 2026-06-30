@@ -20,7 +20,7 @@ use crate::audit::{NewAuditEntry, RequestAuditContext};
 use crate::auth::{DeviceAuthorization, DeviceTokenOutcome};
 use crate::authz::Identity;
 use crate::errors::ApiError;
-use crate::github::models::{PollResponse, WhoamiResponse};
+use crate::github::models::{PollIdentity, PollResponse, WhoamiResponse};
 use crate::request_id::RequestId;
 use crate::state::AppState;
 
@@ -85,19 +85,25 @@ pub async fn device_poll(
         } => {
             let provider_id = provider.metadata().id;
 
-            // Best-effort identity resolution so the audit event is attributable.
-            // The authorization already succeeded, so a lookup failure must not
-            // deny the token — we still record the event with actor "unknown".
-            let (actor, subject) = match provider.fetch_identity(&access_token).await {
-                Ok(identity) => (identity.username, Some(identity.subject)),
+            // Best-effort identity resolution so the audit event is attributable
+            // and the CLI can persist a provider-agnostic identity. The
+            // authorization already succeeded, so a lookup failure must not deny
+            // the token — we still record the event with actor "unknown".
+            let identity = match provider.fetch_identity(&access_token).await {
+                Ok(identity) => Some(identity),
                 Err(err) => {
                     tracing::warn!(
                         error = %err,
                         "could not resolve identity for device authorization audit"
                     );
-                    ("unknown".to_string(), None)
+                    None
                 }
             };
+            let actor = identity
+                .as_ref()
+                .map(|i| i.username.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            let subject = identity.as_ref().map(|i| i.subject.clone());
 
             // Enterprise client context (privacy-preserving; never tokens/secrets).
             let client = RequestAuditContext::from_headers(
@@ -108,7 +114,7 @@ pub async fn device_poll(
             .with_provider(provider_id.clone());
 
             let mut metadata = json!({
-                "provider": provider_id,
+                "provider": provider_id.clone(),
                 "scopes": scope,
                 "client": client.to_value(),
             });
@@ -125,7 +131,17 @@ pub async fn device_poll(
                 )
                 .await?;
 
-            Ok(Json(PollResponse::approved(access_token)))
+            let poll_identity = identity.map(|i| PollIdentity {
+                provider: provider_id,
+                subject: i.subject,
+                username: i.username,
+                email: i.email,
+                name: i.display_name,
+            });
+            Ok(Json(PollResponse::approved_with(
+                access_token,
+                poll_identity,
+            )))
         }
     }
 }

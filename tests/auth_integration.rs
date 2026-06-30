@@ -132,6 +132,11 @@ async fn device_poll_approved_returns_token_and_audits() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "approved");
     assert_eq!(body["access_token"], "gho_secret");
+    // The approved response echoes the resolved, provider-agnostic identity so
+    // the CLI can persist it without a separate (GitHub-specific) whoami call.
+    assert_eq!(body["identity"]["provider"], "github");
+    assert_eq!(body["identity"]["username"], "vasugarg");
+    assert_eq!(body["identity"]["subject"], "12345");
 
     let events = audit_events(&audit_state).await;
     assert_eq!(
