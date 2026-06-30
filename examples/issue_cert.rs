@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subject =
         ssh_key::PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)?;
     let request = CertificateRequest {
-        github_login: "vasugarg".to_string(),
+        principal: "vasugarg".to_string(),
         hostname: "web-01".to_string(),
         public_key: subject.public_key().to_openssh()?,
         ttl_seconds: 300,

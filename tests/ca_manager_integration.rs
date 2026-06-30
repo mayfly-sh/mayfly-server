@@ -59,7 +59,7 @@ fn request() -> CertificateRequest {
         .to_openssh()
         .expect("openssh");
     CertificateRequest {
-        github_login: "vasugarg".to_string(),
+        principal: "vasugarg".to_string(),
         hostname: "web-01".to_string(),
         public_key: subject,
         ttl_seconds: 300,

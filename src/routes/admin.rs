@@ -276,7 +276,7 @@ pub async fn mint_enrollment_token(
 
     let service = EnrollmentService::sqlite(state.db().clone(), state.clock_arc(), server_identity);
     let issued = service
-        .create_enrollment_token(identity.login.clone(), ttl, request.single_use)
+        .create_enrollment_token(identity.username.clone(), ttl, request.single_use)
         .await
         .map_err(|err| ApiError::internal(anyhow::Error::new(err)))?;
 
@@ -285,7 +285,7 @@ pub async fn mint_enrollment_token(
     state
         .audit()
         .append_audit_event(
-            NewAuditEntry::new("machine.enrollment_token.minted", identity.login.clone())
+            NewAuditEntry::new("machine.enrollment_token.minted", identity.username.clone())
                 .with_subject(issued.record.id.clone())
                 .with_metadata(json!({
                     "expires_at": issued.record.expires_at.to_rfc3339(),
@@ -355,7 +355,7 @@ pub async fn retire(
     if !assessment.safe && !force {
         tracing::warn!(
             target: "mayfly::security",
-            actor = %identity.login,
+            actor = %identity.username,
             key_id = %assessment.key_id,
             affected = assessment.affected_machines,
             "ca retirement denied: machines still depend on the key",
@@ -378,7 +378,7 @@ pub async fn retire(
         // Forced retirement over an unsafe assessment: loud and audited.
         tracing::warn!(
             target: "mayfly::security",
-            actor = %identity.login,
+            actor = %identity.username,
             key_id = %assessment.key_id,
             affected = assessment.affected_machines,
             "ca retirement FORCED despite dependent machines",
@@ -390,7 +390,7 @@ pub async fn retire(
     state
         .audit()
         .append_audit_event(
-            NewAuditEntry::new("ca.retired", identity.login.clone())
+            NewAuditEntry::new("ca.retired", identity.username.clone())
                 .with_subject(record.key_id.clone())
                 .with_metadata(json!({
                     "id": record.id,
@@ -424,7 +424,7 @@ async fn audit_retirement(
     state
         .audit()
         .append_audit_event(
-            NewAuditEntry::new(action, identity.login.clone())
+            NewAuditEntry::new(action, identity.username.clone())
                 .with_subject(assessment.key_id.clone())
                 .with_metadata(json!({
                     "id": assessment.id,
@@ -445,11 +445,11 @@ async fn authorize_admin(
     token: &str,
     action: &str,
 ) -> Result<Identity, ApiError> {
-    let identity = resolve_identity(state, token).await?;
+    let identity = resolve_identity(state, None, token).await?;
     if let AuthzDecision::Deny { reason } = state.authz().authorize(&identity) {
         tracing::warn!(
             target: "mayfly::security",
-            actor = %identity.login,
+            actor = %identity.username,
             action = %action,
             reason = %reason,
             "ca admin action denied",
@@ -457,7 +457,7 @@ async fn authorize_admin(
         state
             .audit()
             .append_audit_event(
-                NewAuditEntry::new("ca.admin_denied", identity.login.clone())
+                NewAuditEntry::new("ca.admin_denied", identity.username.clone())
                     .with_subject(action.to_string())
                     .with_metadata(json!({ "reason": reason })),
             )
@@ -485,7 +485,7 @@ async fn audit_lifecycle(
     state
         .audit()
         .append_audit_event(
-            NewAuditEntry::new(action, identity.login.clone())
+            NewAuditEntry::new(action, identity.username.clone())
                 .with_subject(record.key_id.clone())
                 .with_metadata(json!({
                     "id": record.id,

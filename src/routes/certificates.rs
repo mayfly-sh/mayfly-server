@@ -3,27 +3,32 @@
 //! - `POST /api/v1/certificates/issue`    — authenticate, authorize, sign.
 //! - `GET  /api/v1/certificates/validate` — check a certificate against the CA.
 //!
-//! The issuance flow is: Bearer GitHub token → GitHub identity lookup →
+//! The issuance flow is provider-agnostic: Bearer token → provider identity
+//! resolution (`?provider=`/body `provider`, default provider when absent) →
 //! authorization → CA signing → audit → response. The principal is taken from
-//! the authenticated GitHub identity, never from the request body, so a caller
-//! cannot request a certificate for someone else.
+//! the authenticated identity's username, never from the request body, so a
+//! caller cannot request a certificate for someone else, and no GitHub-specific
+//! assumption remains.
 
 use axum::extract::State;
-use axum::Json;
+use axum::http::HeaderMap;
+use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::audit::NewAuditEntry;
+use crate::audit::{NewAuditEntry, RequestAuditContext};
 use crate::authz::{AuthzDecision, AuthzError};
 use crate::ca::{CertificateRequest, CertificateResponse, CertificateValidation};
 use crate::errors::ApiError;
+use crate::request_id::RequestId;
 use crate::routes::auth::{resolve_identity, BearerToken};
 use crate::state::AppState;
 
 /// Request body for `POST /api/v1/certificates/issue`.
 ///
-/// The principal/`github_login` is intentionally absent — it is derived from
-/// the authenticated identity.
+/// The principal is intentionally absent — it is derived from the authenticated
+/// identity. `provider` optionally selects the IdP that issued the bearer token
+/// (default provider when absent), mirroring the device-flow endpoints.
 #[derive(Debug, Clone, Deserialize)]
 pub struct IssueCertificateRequest {
     /// The user's OpenSSH public key to be signed.
@@ -33,6 +38,10 @@ pub struct IssueCertificateRequest {
     /// Requested lifetime in seconds; `0`/absent selects the CA default.
     #[serde(default)]
     pub ttl_seconds: u32,
+    /// Provider id the bearer token belongs to (defaults to the configured
+    /// default provider).
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 /// Request body for `GET /api/v1/certificates/validate`.
@@ -45,6 +54,8 @@ pub struct ValidateCertificateRequest {
 /// `POST /api/v1/certificates/issue` — issue a certificate for the bearer.
 pub async fn issue(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
     BearerToken(token): BearerToken,
     Json(request): Json<IssueCertificateRequest>,
 ) -> Result<Json<CertificateResponse>, ApiError> {
@@ -52,14 +63,15 @@ pub async fn issue(
         ApiError::internal(anyhow::anyhow!("certificate authority is not configured"))
     })?;
 
-    // 1. Resolve identity from the GitHub token.
-    let identity = resolve_identity(&state, &token).await?;
+    // 1. Resolve identity through the selected provider (provider-agnostic).
+    let identity = resolve_identity(&state, request.provider.as_deref(), &token).await?;
 
     // 2. Authorize (deny-by-default).
     if let AuthzDecision::Deny { reason } = state.authz().authorize(&identity) {
         tracing::warn!(
             target: "mayfly::security",
-            actor = %identity.login,
+            actor = %identity.username,
+            provider = %identity.provider,
             reason = %reason,
             "certificate issuance denied",
         );
@@ -67,9 +79,13 @@ pub async fn issue(
         state
             .audit()
             .append_audit_event(
-                NewAuditEntry::new("certificate.denied", identity.login.clone())
+                NewAuditEntry::new("certificate.denied", identity.username.clone())
                     .with_subject(request.hostname.clone())
-                    .with_metadata(json!({ "reason": reason })),
+                    .with_metadata(json!({
+                        "reason": reason,
+                        "provider": identity.provider,
+                        "subject": identity.subject,
+                    })),
             )
             .await?;
         return Err(AuthzError::Denied { reason }.into());
@@ -77,18 +93,23 @@ pub async fn issue(
 
     // 3. Sign. Principal comes from the authenticated identity, not the body.
     let cert_request = CertificateRequest {
-        github_login: identity.login.clone(),
+        principal: identity.username.clone(),
         hostname: request.hostname.clone(),
         public_key: request.public_key,
         ttl_seconds: request.ttl_seconds,
     };
     let response = ca.sign_certificate(&cert_request).await?;
 
-    // 4. Audit the issuance (fail-closed).
+    // 4. Audit the issuance (fail-closed). Records provider identity facts
+    //    (provider/subject/realm/groups/roles) and the privacy-preserving client
+    //    context, without ever logging the token.
+    let client =
+        RequestAuditContext::from_headers(&headers, Some(request_id.as_str()), state.clock().now())
+            .with_provider(identity.provider.clone());
     state
         .audit()
         .append_audit_event(
-            NewAuditEntry::new("certificate.issued", identity.login.clone())
+            NewAuditEntry::new("certificate.issued", identity.username.clone())
                 .with_subject(request.hostname.clone())
                 .with_metadata(json!({
                     "serial": response.serial,
@@ -98,6 +119,12 @@ pub async fn issue(
                     "valid_before": response.valid_before,
                     "ca_key_id": response.ca_key_id,
                     "ca_fingerprint": response.ca_fingerprint,
+                    "provider": identity.provider,
+                    "subject": identity.subject,
+                    "realm": identity.realm,
+                    "groups": identity.groups,
+                    "roles": identity.roles,
+                    "client": client.to_value(),
                 })),
         )
         .await?;

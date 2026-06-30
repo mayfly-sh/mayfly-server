@@ -172,25 +172,41 @@ impl PollResponse {
 }
 
 /// Response for `GET /api/v1/auth/whoami`.
+///
+/// Provider-neutral: `provider`/`subject`/`username`/`name`/`email` describe the
+/// authenticated identity for any provider. The legacy `github_login`/`github_id`
+/// fields are retained for backward compatibility — `github_login` mirrors
+/// `username`, and `github_id` is the numeric `subject` for GitHub (`0` for
+/// providers whose subject is not numeric, e.g. an OIDC `sub`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WhoamiResponse {
-    /// GitHub login.
-    pub github_login: String,
-    /// Numeric GitHub id.
-    pub github_id: u64,
+    /// Provider id that authenticated the identity.
+    pub provider: String,
+    /// Stable, provider-unique subject.
+    pub subject: String,
+    /// Human username/login.
+    pub username: String,
     /// Display name, if any.
     pub name: Option<String>,
     /// Email, if any.
     pub email: Option<String>,
+    /// Legacy GitHub login alias of `username` (backward compatibility).
+    pub github_login: String,
+    /// Legacy GitHub numeric id; `0` for non-GitHub providers.
+    pub github_id: u64,
 }
 
-impl From<GitHubUser> for WhoamiResponse {
-    fn from(user: GitHubUser) -> Self {
+impl WhoamiResponse {
+    /// Build a provider-neutral whoami response from an authenticated identity.
+    pub fn from_identity(identity: &crate::auth::AuthenticatedIdentity) -> Self {
         Self {
-            github_login: user.login,
-            github_id: user.id,
-            name: user.name,
-            email: user.email,
+            provider: identity.provider.clone(),
+            subject: identity.subject.clone(),
+            username: identity.username.clone(),
+            name: identity.display_name.clone(),
+            email: identity.email.clone(),
+            github_login: identity.username.clone(),
+            github_id: identity.subject.parse().unwrap_or(0),
         }
     }
 }

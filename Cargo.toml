@@ -37,6 +37,9 @@ hyper-util = { version = "0.1", features = [
     "service",
     "tokio",
 ] }
+# OIDC/JWT verification for the Keycloak provider. Uses the `ring` backend
+# (no OpenSSL, consistent with ADR-0001). Provides JWKS (`jwk`) + RS*/ES*.
+jsonwebtoken = "9"
 # rustls with the `ring` provider only — no aws-lc, no OpenSSL.
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2"] }
@@ -63,6 +66,7 @@ tokio = { version = "1", features = [
     "signal",
     "io-util",
     "time",
+    "sync",
 ] }
 tokio-rustls = { version = "0.26", default-features = false, features = [
     "ring",
@@ -86,6 +90,11 @@ wiremock = "0.6.5"
 # `p256` (dev only) lets tests generate a non-Ed25519 key to exercise the
 # CA's algorithm-rejection path. It is not compiled into the release binary.
 ssh-key = { version = "0.6", default-features = false, features = ["p256"] }
+# `rsa` (dev only) mints RS256-signed JWTs and derives the matching JWK in the
+# Keycloak OIDC tests; never compiled into the release binary.
+rsa = { version = "0.9", features = ["sha2"] }
+# `rand_core` (dev only) supplies the OS CSPRNG for RSA test-key generation.
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [profile.dev.package.sqlx-macros]
 opt-level = 3

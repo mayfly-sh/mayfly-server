@@ -72,6 +72,14 @@ pub struct Config {
     /// GitHub OAuth settings (required for authentication).
     #[serde(default)]
     pub github: GithubConfig,
+    /// Optional Keycloak/OIDC provider settings. When present, Keycloak is
+    /// registered as an additional authentication provider.
+    #[serde(default)]
+    pub keycloak: Option<KeycloakConfig>,
+    /// Optional id of the default authentication provider (e.g. `github`,
+    /// `keycloak`). When unset, GitHub is the default.
+    #[serde(default)]
+    pub default_provider: Option<String>,
     /// SSH certificate authority settings.
     #[serde(default)]
     pub ca: CaConfig,
@@ -199,6 +207,55 @@ impl GithubConfig {
     }
 }
 
+/// Keycloak / generic-OIDC provider configuration.
+///
+/// IdP connection settings live server-side (the CLI logs in through the server,
+/// ADR-0019), so client secrets never reach clients. Endpoints are discovered
+/// from `issuer_url` via OIDC discovery; access tokens are verified as JWTs
+/// against the realm's JWKS. `client_secret` is `Option<Secret<_>>` for the same
+/// reason as GitHub's (so a missing secret stays `null`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeycloakConfig {
+    /// Realm base URL / OIDC issuer, e.g.
+    /// `https://kc.example.com/realms/engineering`.
+    pub issuer_url: String,
+    /// OAuth client id used for the device authorization grant.
+    #[serde(default)]
+    pub client_id: String,
+    /// Optional confidential-client secret (sensitive; redacted in all output).
+    #[serde(default)]
+    pub client_secret: Option<Secret<String>>,
+    /// Space-delimited scopes (default `openid profile email`).
+    #[serde(default = "default_keycloak_scopes")]
+    pub scopes: String,
+    /// Expected access-token audience (`aud`). When unset, audience is not
+    /// enforced (Keycloak access-token `aud` varies by realm configuration).
+    #[serde(default)]
+    pub audience: Option<String>,
+    /// Clock-skew leeway, in seconds, for `exp`/`nbf` validation.
+    #[serde(default = "default_keycloak_clock_skew")]
+    pub clock_skew_seconds: u64,
+}
+
+fn default_keycloak_scopes() -> String {
+    "openid profile email".to_string()
+}
+
+fn default_keycloak_clock_skew() -> u64 {
+    60
+}
+
+impl KeycloakConfig {
+    /// The client secret value, or `None` if unset.
+    pub fn client_secret_value(&self) -> Option<String> {
+        self.client_secret
+            .as_ref()
+            .map(|s| s.expose_secret().clone())
+            .filter(|s| !s.is_empty())
+    }
+}
+
 /// SSH certificate authority configuration.
 ///
 /// Mayfly is a CA management server: it manages between 1 and
@@ -307,16 +364,20 @@ impl Default for BundleConfig {
     }
 }
 
-/// Authorization allowlists.
+/// Authorization allowlists (provider-neutral, deny-by-default).
 ///
-/// Access is **deny-by-default**: a caller is permitted only if their GitHub
-/// login appears in `allowed_users`, one of their orgs in `allowed_orgs`, or
-/// one of their teams (formatted `org-login/team-slug`) in `allowed_teams`.
-/// An entirely empty configuration therefore denies everyone.
+/// Access is **deny-by-default**: a caller is permitted only if a fact of their
+/// identity matches one of the allowlists below. `allowed_users` matches the
+/// username (GitHub login or OIDC `preferred_username`); `allowed_orgs`/
+/// `allowed_teams` match GitHub orgs/teams (`org-login/team-slug`);
+/// `allowed_groups`/`allowed_roles` match OIDC groups and realm/client roles
+/// (`role` or `client/role`); `allowed_attributes` matches generic OIDC claims
+/// (each entry `key=value`). An entirely empty configuration denies everyone.
+/// All matching is case-insensitive.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccessConfig {
-    /// GitHub logins that are always allowed.
+    /// Usernames that are always allowed (GitHub login / OIDC preferred_username).
     #[serde(default)]
     pub allowed_users: Vec<String>,
     /// GitHub org logins whose members are allowed.
@@ -325,6 +386,15 @@ pub struct AccessConfig {
     /// GitHub teams (as `org-login/team-slug`) whose members are allowed.
     #[serde(default)]
     pub allowed_teams: Vec<String>,
+    /// OIDC groups whose members are allowed (e.g. Keycloak groups).
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    /// OIDC roles whose holders are allowed (realm `role` or `client/role`).
+    #[serde(default)]
+    pub allowed_roles: Vec<String>,
+    /// OIDC attributes whose holders are allowed, each as `key=value`.
+    #[serde(default)]
+    pub allowed_attributes: Vec<String>,
 }
 
 /// Log output format.
@@ -480,6 +550,34 @@ impl Config {
             return Err(ConfigError::Validation(
                 "github.client_secret is required".to_string(),
             ));
+        }
+
+        // Keycloak (optional): when configured, issuer + client id are required
+        // so the provider can perform OIDC discovery and the device grant.
+        if let Some(keycloak) = &self.keycloak {
+            if keycloak.issuer_url.trim().is_empty() {
+                return Err(ConfigError::Validation(
+                    "keycloak.issuer_url is required when keycloak is configured".to_string(),
+                ));
+            }
+            if keycloak.client_id.trim().is_empty() {
+                return Err(ConfigError::Validation(
+                    "keycloak.client_id is required when keycloak is configured".to_string(),
+                ));
+            }
+        }
+
+        // default_provider, when set, must name a provider that will be
+        // registered (github is always present; keycloak only when configured).
+        if let Some(default_provider) = self.default_provider.as_deref() {
+            let known = matches!(default_provider, "github")
+                || (default_provider == "keycloak" && self.keycloak.is_some());
+            if !known {
+                return Err(ConfigError::Validation(format!(
+                    "default_provider '{default_provider}' is not a configured provider \
+                     (expected 'github', or 'keycloak' with a [keycloak] section)"
+                )));
+            }
         }
 
         // CA: validate the storage configuration. The authoritative checks (at

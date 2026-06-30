@@ -97,10 +97,14 @@ pub struct PublicBundle {
 }
 
 /// A request to issue an SSH user certificate.
+///
+/// `principal` is the authenticated identity's username (GitHub login or OIDC
+/// `preferred_username`); it is always derived from the authenticated identity,
+/// never from the client request body, and becomes the certificate principal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CertificateRequest {
-    /// GitHub login of the requester; becomes the default certificate principal.
-    pub github_login: String,
+    /// Authenticated username; becomes the certificate principal.
+    pub principal: String,
     /// Host the certificate is intended for (recorded for traceability).
     pub hostname: String,
     /// The user's OpenSSH-formatted public key to be signed.

@@ -40,6 +40,31 @@ github:
   # device_base_url: "https://github.com"   # override for GitHub Enterprise
   # api_base_url: "https://api.github.com"
 
+# Optional Keycloak / generic-OIDC provider. When this section is present,
+# Keycloak is registered alongside GitHub as a first-class provider: clients
+# select it with `?provider=keycloak` (the CLI's --provider / config.provider).
+# Endpoints are discovered from issuer_url via OIDC discovery; access tokens are
+# verified as JWTs against the realm JWKS (issuer + optional audience + exp/nbf
+# with clock-skew leeway, algorithm pinned to the JWK key type).
+#
+# issuer_url and client_id are REQUIRED when this section is present. Prefer
+# supplying the secret via the environment, not this file:
+#   MAYFLY_KEYCLOAK__ISSUER_URL=https://kc.example.com/realms/engineering
+#   MAYFLY_KEYCLOAK__CLIENT_ID=mayfly-cli
+#   MAYFLY_KEYCLOAK__CLIENT_SECRET=xxxxxxxx   # confidential clients only
+# keycloak:
+#   issuer_url: "https://kc.example.com/realms/engineering"
+#   client_id: "mayfly-cli"
+#   # client_secret: "xxxxxxxx"               # omit for public clients
+#   # scopes: "openid profile email"          # default
+#   # audience: "mayfly"                       # recommended: enforce aud
+#   # clock_skew_seconds: 60                   # default
+
+# Optional default authentication provider when a request omits `?provider=`.
+# Must name a configured provider ("github", or "keycloak" with a [keycloak]
+# section). Defaults to "github" when unset.
+# default_provider: "github"
+
 # SSH certificate authority. Mayfly is a CA management server: it manages 1–64
 # CAs whose metadata lives in the database and whose ENCRYPTED OpenSSH Ed25519
 # private keys live on disk under `storage_directory`. CAs are NOT listed here —
@@ -90,13 +115,23 @@ bundle:
   ttl_seconds: 3600
   signing_key_env: "BUNDLE_SIGNING_KEY"
 
-# Authorization allowlists (deny-by-default). A caller may obtain a certificate
-# only if their GitHub login is in allowed_users, OR one of their orgs is in
-# allowed_orgs, OR one of their teams (formatted "org-login/team-slug") is in
-# allowed_teams. Leaving all three empty denies everyone. Matching is
-# case-insensitive. Org/team membership is only queried from GitHub when the
-# corresponding list is non-empty (and may require the read:org scope).
+# Authorization allowlists (deny-by-default, provider-neutral). A caller may
+# obtain a certificate only if a fact of their identity matches one of these:
+#   allowed_users   — username (GitHub login OR OIDC preferred_username)
+#   allowed_orgs    — GitHub orgs
+#   allowed_teams   — GitHub teams ("org-login/team-slug")
+#   allowed_groups  — OIDC groups (e.g. Keycloak groups)
+#   allowed_roles   — OIDC roles (realm "role" or client "client/role")
+#   allowed_attributes — OIDC attributes, each "key=value"
+# Leaving all empty denies everyone. Matching is case-insensitive. A provider
+# resolves only the facts the policy references (GitHub skips org/team API calls
+# when allowed_orgs/allowed_teams are empty). NOTE: allowlists are NOT scoped by
+# provider — for Keycloak prefer groups/roles/attributes (use "client/role", not
+# bare role names) to avoid username collisions across IdPs (risk R-012A-1).
 access:
   allowed_users: [""]
   allowed_orgs: []
   allowed_teams: []
+  allowed_groups: []
+  allowed_roles: []
+  allowed_attributes: []

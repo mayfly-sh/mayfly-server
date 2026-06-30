@@ -120,7 +120,13 @@ impl AppState {
     /// registry is cheap to build (only `Arc` clones), so handlers construct one
     /// per request rather than storing it.
     pub fn providers(&self) -> ProviderRegistry {
-        let mut registry = ProviderRegistry::new(crate::auth::github::PROVIDER_ID)
+        // The default selection honors `default_provider` when set, else GitHub.
+        let default_id = self
+            .config
+            .default_provider
+            .as_deref()
+            .unwrap_or(crate::auth::github::PROVIDER_ID);
+        let mut registry = ProviderRegistry::new(default_id)
             .with(Arc::new(GitHubProvider::new(Arc::clone(&self.github))));
         for provider in &self.extra_providers {
             registry.register(Arc::clone(provider));

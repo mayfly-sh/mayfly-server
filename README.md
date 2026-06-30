@@ -8,10 +8,15 @@ keys, hosts trust a single CA public key, and every certificate is minted on dem
 scoped to a principal, and expires within minutes. Each issuance and denial is
 recorded in a tamper-evident, append-only audit log.
 
-- **GitHub Device Flow auth** — no passwords or pre-provisioned keys; identity is
-  established through GitHub OAuth.
-- **Deny-by-default authorization** — access is granted only via explicit user, org,
-  or team allowlists.
+- **Pluggable identity providers** — GitHub **and** Keycloak/OIDC are first-class
+  providers behind one abstraction (`AuthenticationProvider`/`ProviderRegistry`);
+  clients select one with an optional `provider` (`?provider=` / body field), and
+  adding another provider is "implement the trait + register" (ADR-0018/ADR-0021).
+  See `docs/keycloak.md` and `docs/oidc.md`.
+- **Device Flow auth** — no passwords or pre-provisioned keys; identity is
+  established through the provider's device authorization grant (RFC 8628).
+- **Deny-by-default authorization** — provider-neutral allowlists: GitHub user/org/
+  team **and** OIDC group/role/attribute. Empty config denies everyone.
 - **CA management platform** — manages 1–64 Ed25519 CAs whose metadata lives in SQLite and
   whose encrypted keys live on disk. CAs are generated, imported, enabled, disabled, and
   renamed through an admin API; the CA manager picks an enabled CA per request and signs
@@ -21,8 +26,9 @@ recorded in a tamper-evident, append-only audit log.
   fail-closed writes on every security-relevant action.
 - **HTTPS only** — a single TLS listener negotiating HTTP/2 or HTTP/1.1 via ALPN, built
   on `rustls` with the `ring` provider. No plaintext transport.
-- **Fail-fast startup** — configuration, TLS material, GitHub credentials, and every
-  stored CA are validated before the server accepts connections.
+- **Fail-fast startup** — configuration, TLS material, provider credentials (GitHub
+  and, when configured, Keycloak), and every stored CA are validated before the
+  server accepts connections.
 - `#![forbid(unsafe_code)]` crate-wide.
 
 ## Requirements
@@ -71,7 +77,8 @@ curl -k -X PATCH https://127.0.0.1:8443/api/v1/admin/ca/<id> \
 
 ### 2. Configure
 
-Copy the example configuration and fill in your GitHub OAuth credentials:
+Copy the example configuration and fill in your provider credentials (GitHub OAuth,
+and/or a `keycloak` section for Keycloak/OIDC — see `docs/keycloak.md`):
 
 ```bash
 cp config.example.yaml config.yaml
@@ -120,9 +127,9 @@ All endpoints are served under the `/api/v1` prefix.
 | ------ | --------------------------- | ----------- | ---------------------------------------------------- |
 | `GET`  | `/health`                   | none        | Liveness, version, and uptime.                       |
 | `GET`  | `/ready`                    | none        | Readiness checks.                                    |
-| `POST` | `/auth/device/start`        | none        | Begin the GitHub Device Flow.                        |
-| `POST` | `/auth/device/poll`         | none        | Exchange a device code for an access token.          |
-| `GET`  | `/auth/whoami`              | Bearer      | Resolve the GitHub identity behind a token.          |
+| `POST` | `/auth/device/start`        | none        | Begin the device flow (optional `?provider=`).       |
+| `POST` | `/auth/device/poll`         | none        | Exchange a device code for an access token (body `provider?`). |
+| `GET`  | `/auth/whoami`              | Bearer      | Resolve the identity behind a token (optional `?provider=`). |
 | `POST` | `/certificates/issue`       | Bearer      | Authenticate, authorize, and sign an SSH certificate.|
 | `GET`  | `/certificates/validate`    | none        | Validate a certificate against the CA.               |
 | `POST` | `/admin/ca/generate`        | Bearer      | Generate a new encrypted Ed25519 CA.                 |
@@ -138,7 +145,8 @@ All endpoints are served under the `/api/v1` prefix.
 | `GET`  | `/agent/ca-bundle`          | Ed25519 sig | Fetch the current **signed** CA bundle (ETag / `304`).|
 | `POST` | `/agent/ca-bundle/ack`      | Ed25519 sig | Report apply outcome (`applied` / `rollback` / `signature_failed`). |
 
-Authenticated endpoints expect an `Authorization: Bearer <github-access-token>` header.
+Authenticated endpoints expect an `Authorization: Bearer <provider-access-token>` header
+(a GitHub token, or — with `?provider=keycloak` / body `provider` — an OIDC access token).
 Agent endpoints are authenticated by a per-request Ed25519 signature, not a bearer token.
 
 ### Signed CA bundle distribution
@@ -185,17 +193,21 @@ JSON document with members in fixed (alphabetical) order and keys sorted by
 
 ### Issuing a certificate
 
-The certificate principal is always derived from the authenticated GitHub identity —
-never from the request body — so a caller cannot request a certificate for someone else.
+The certificate principal is always derived from the authenticated identity (the
+provider's username) — never from the request body — so a caller cannot request a
+certificate for someone else. This holds for every provider. Add an optional
+`"provider"` field to verify the bearer against a non-default provider (e.g.
+`"keycloak"`); omit it to use the configured `default_provider`.
 
 ```bash
 curl -sk -X POST https://127.0.0.1:8443/api/v1/certificates/issue \
-  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "public_key": "ssh-ed25519 AAAA... user@host",
     "hostname": "bastion.example.com",
-    "ttl_seconds": 300
+    "ttl_seconds": 300,
+    "provider": "keycloak"
   }'
 ```
 
@@ -220,6 +232,13 @@ fingerprint, effective TTL, and validity window.
 | `github.scopes`           | OAuth scopes (default `read:user user:email`).                     |
 | `github.device_base_url`  | Device/authorization base URL (override for GitHub Enterprise).    |
 | `github.api_base_url`     | REST API base URL.                                                 |
+| `keycloak.issuer_url`     | OIDC issuer URL (required when `[keycloak]` present). See `docs/keycloak.md`. |
+| `keycloak.client_id`      | OIDC client id (required when `[keycloak]` present).              |
+| `keycloak.client_secret`  | OIDC client secret (confidential clients only; prefer the environment). |
+| `keycloak.scopes`         | OAuth scopes (default `openid profile email`).                     |
+| `keycloak.audience`       | Expected token `aud`; enforced only when set (recommended).        |
+| `keycloak.clock_skew_seconds` | `exp`/`nbf` leeway in seconds (default `60`).                  |
+| `default_provider`        | Provider used when a request omits `provider` (`github` default).  |
 | `ca.storage_directory`    | Directory holding the encrypted CA private key files (default `./ca`). |
 | `ca.selection_strategy`   | Signing-CA selection strategy (`random`).                          |
 | `ca.auto_load`            | Load all stored CAs at startup; bootstrap a first CA if empty (default `true`). |
@@ -228,13 +247,18 @@ fingerprint, effective TTL, and validity window.
 | `bundle.jitter_percent`   | Per-host poll-interval jitter, 0–100 (default `10`).               |
 | `bundle.ttl_seconds`      | Signed bundle validity window in seconds (default `3600`).         |
 | `bundle.signing_key_env`  | Env var holding the base64 Bundle Signing Key seed (default `BUNDLE_SIGNING_KEY`; generated on disk if unset). |
-| `access.allowed_users`    | GitHub logins that are always allowed.                             |
+| `access.allowed_users`    | Usernames always allowed (GitHub login or OIDC `preferred_username`). |
 | `access.allowed_orgs`     | GitHub orgs whose members are allowed.                             |
 | `access.allowed_teams`    | GitHub teams (`org-login/team-slug`) whose members are allowed.    |
+| `access.allowed_groups`   | OIDC groups whose members are allowed (e.g. Keycloak groups).      |
+| `access.allowed_roles`    | OIDC roles allowed (`client/role` or bare realm role).             |
+| `access.allowed_attributes` | OIDC attributes allowed, each `key=value`.                       |
 
-Access is **deny-by-default**: leaving all three `access` lists empty denies everyone.
-Org and team membership is only queried from GitHub when the corresponding list is
-non-empty (and may require the `read:org` scope). Matching is case-insensitive.
+Access is **deny-by-default**: leaving every `access` list empty denies everyone.
+Matching is provider-neutral and case-insensitive — a provider resolves only the
+facts the policy references (GitHub queries org/team membership only when those
+lists are non-empty, which may require the `read:org` scope). Allowlists are **not**
+scoped by provider; for OIDC prefer groups/roles/attributes over `allowed_users`.
 
 ## Development
 

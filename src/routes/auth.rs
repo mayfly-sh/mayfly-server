@@ -17,8 +17,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::audit::{NewAuditEntry, RequestAuditContext};
-use crate::auth::{DeviceAuthorization, DeviceTokenOutcome};
+use crate::auth::{AuthorizationNeeds, DeviceAuthorization, DeviceTokenOutcome};
 use crate::authz::Identity;
+use crate::config::AccessConfig;
 use crate::errors::ApiError;
 use crate::github::models::{PollIdentity, PollResponse, WhoamiResponse};
 use crate::request_id::RequestId;
@@ -148,80 +149,91 @@ pub async fn device_poll(
 
 /// `GET /api/v1/auth/whoami` — resolve identity from a Bearer access token.
 ///
-/// Retained as the GitHub identity echo (`github_login`/`github_id`). The
-/// provider-agnostic identity is available via the auth framework; this endpoint
-/// keeps its GitHub-shaped response for backward compatibility.
+/// Provider-aware: `?provider=<id>` selects the IdP (default provider when
+/// absent), and identity is resolved through the provider abstraction — never a
+/// direct GitHub call. The response is provider-neutral (`provider`, `subject`,
+/// `username`, `name`, `email`) while retaining the legacy `github_login`/
+/// `github_id` fields for backward compatibility (populated from `username`/
+/// numeric `subject`; `github_id` is `0` for non-GitHub providers).
 pub async fn whoami(
     State(state): State<AppState>,
     headers: HeaderMap,
     Extension(request_id): Extension<RequestId>,
+    Query(query): Query<ProviderQuery>,
     BearerToken(access_token): BearerToken,
 ) -> Result<Json<WhoamiResponse>, ApiError> {
-    let user = state.github().get_user(&access_token).await?;
+    let provider = state.providers().resolve(query.provider.as_deref())?;
+    let provider_id = provider.metadata().id;
+    let identity = provider.fetch_identity(&access_token).await?;
 
-    let actor = user.login.clone();
-    let github_id = user.id;
     let client =
         RequestAuditContext::from_headers(&headers, Some(request_id.as_str()), state.clock().now())
-            .with_provider("github");
+            .with_provider(provider_id.clone());
     state
         .audit()
         .append_audit_event(
-            NewAuditEntry::new("auth.identity_lookup", actor)
-                .with_metadata(json!({ "github_id": github_id, "client": client.to_value() })),
+            NewAuditEntry::new("auth.identity_lookup", identity.username.clone()).with_metadata(
+                json!({
+                    "provider": provider_id,
+                    "subject": identity.subject,
+                    "client": client.to_value(),
+                }),
+            ),
         )
         .await?;
 
-    Ok(Json(WhoamiResponse::from(user)))
+    Ok(Json(WhoamiResponse::from_identity(&identity)))
 }
 
-/// Resolve a GitHub Bearer token into an authorization [`Identity`].
+/// Which authorization facts the configured allowlists actually reference.
 ///
-/// Fetches org/team membership only when the access policy references them,
-/// avoiding extra GitHub calls (and OAuth scopes) for user-only allowlists.
-/// Membership-lookup failures fail closed (treated as no memberships), which is
-/// safe because authorization is deny-by-default. Shared by certificate
-/// issuance and the admin API so both resolve identity identically.
-pub async fn resolve_identity(state: &AppState, token: &str) -> Result<Identity, ApiError> {
-    let github = state.github();
-    let user = github.get_user(token).await?;
+/// Providers use this to skip work the policy does not need (e.g. GitHub avoids
+/// org/team API calls for user-only allowlists).
+pub fn needs_from_access(access: &AccessConfig) -> AuthorizationNeeds {
+    AuthorizationNeeds {
+        organizations: !access.allowed_orgs.is_empty(),
+        teams: !access.allowed_teams.is_empty(),
+        groups: !access.allowed_groups.is_empty(),
+        roles: !access.allowed_roles.is_empty(),
+        attributes: !access.allowed_attributes.is_empty(),
+    }
+}
 
-    let access = &state.config().access;
-    let orgs = if access.allowed_orgs.is_empty() {
-        Vec::new()
-    } else {
-        fetch_or_empty(github.get_user_orgs(token).await, "orgs")
-    };
-    let teams = if access.allowed_teams.is_empty() {
-        Vec::new()
-    } else {
-        fetch_or_empty(github.get_user_teams(token).await, "teams")
-    };
+/// Resolve a Bearer token into a provider-neutral authorization [`Identity`].
+///
+/// Provider-agnostic: it resolves the selected provider (default when
+/// `provider_selector` is absent), maps its [`crate::auth::AuthenticatedIdentity`]
+/// into the authorization identity, and asks the provider to resolve only the
+/// authorization facts the policy needs (orgs/teams/groups/roles/attributes).
+/// Membership-lookup failures fail closed inside each provider (treated as no
+/// memberships), which is safe because authorization is deny-by-default. Shared
+/// by certificate issuance, server listing, and the admin API so all resolve
+/// identity identically across providers.
+pub async fn resolve_identity(
+    state: &AppState,
+    provider_selector: Option<&str>,
+    token: &str,
+) -> Result<Identity, ApiError> {
+    let provider = state.providers().resolve(provider_selector)?;
+    let authd = provider.fetch_identity(token).await?;
+    let needs = needs_from_access(&state.config().access);
+    let context = provider
+        .resolve_authorization(token, &authd, &needs)
+        .await?;
 
     Ok(Identity {
-        login: user.login,
-        github_id: user.id,
-        orgs,
-        teams,
+        provider: authd.provider,
+        subject: authd.subject,
+        username: authd.username,
+        email: authd.email,
+        display_name: authd.display_name,
+        realm: context.realm,
+        organizations: context.organizations,
+        teams: context.teams,
+        groups: context.groups,
+        roles: context.roles,
+        attributes: context.attributes,
     })
-}
-
-/// Use a successful org/team lookup, or treat a failure as "no memberships".
-fn fetch_or_empty(
-    result: Result<Vec<String>, crate::github::GitHubError>,
-    what: &str,
-) -> Vec<String> {
-    match result {
-        Ok(values) => values,
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                membership = what,
-                "failed to resolve GitHub membership; treating as none for authorization",
-            );
-            Vec::new()
-        }
-    }
 }
 
 /// Extractor for an `Authorization: Bearer <token>` header.

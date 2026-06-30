@@ -17,7 +17,8 @@ pub mod registry;
 pub use github::GitHubProvider;
 pub use keycloak::{KeycloakProvider, KeycloakProviderConfig};
 pub use provider::{
-    AuthProviderError, AuthenticatedIdentity, AuthenticationProvider, DeviceAuthorization,
-    DeviceTokenOutcome, OAuthSession, ProviderKind, ProviderMetadata,
+    AuthProviderError, AuthenticatedIdentity, AuthenticationProvider, AuthorizationContext,
+    AuthorizationNeeds, DeviceAuthorization, DeviceTokenOutcome, OAuthSession, ProviderKind,
+    ProviderMetadata,
 };
 pub use registry::ProviderRegistry;

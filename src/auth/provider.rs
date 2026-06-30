@@ -6,6 +6,8 @@
 //! trait — they never branch on the concrete provider, so adding a provider is
 //! "implement the trait and register it" with no edits to authentication logic.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use thiserror::Error;
 
@@ -61,6 +63,65 @@ pub struct AuthenticatedIdentity {
     pub email: Option<String>,
     /// Display name, when available.
     pub display_name: Option<String>,
+}
+
+/// Which authorization facts a provider should resolve for a request.
+///
+/// Derived from the configured allowlists so a provider only does the work the
+/// policy actually needs (e.g. GitHub skips org/team API calls when the policy
+/// references neither). Providers whose facts are free (e.g. JWT claims) may
+/// ignore this and always populate everything they have.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AuthorizationNeeds {
+    /// The policy references organizations (GitHub orgs).
+    pub organizations: bool,
+    /// The policy references teams (GitHub teams).
+    pub teams: bool,
+    /// The policy references groups (OIDC groups).
+    pub groups: bool,
+    /// The policy references roles (OIDC realm/client roles).
+    pub roles: bool,
+    /// The policy references attributes (generic OIDC claims).
+    pub attributes: bool,
+}
+
+impl AuthorizationNeeds {
+    /// Whether any membership fact is required.
+    pub fn any(&self) -> bool {
+        self.organizations || self.teams || self.groups || self.roles || self.attributes
+    }
+
+    /// Request every fact the provider can supply (used by diagnostics like
+    /// `whoami` that display memberships rather than gate on them).
+    pub fn all() -> Self {
+        Self {
+            organizations: true,
+            teams: true,
+            groups: true,
+            roles: true,
+            attributes: true,
+        }
+    }
+}
+
+/// Provider-neutral authorization facts about an identity.
+///
+/// Populated by [`AuthenticationProvider::resolve_authorization`]. Every field is
+/// optional/empty by default so a provider only fills what it natively exposes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuthorizationContext {
+    /// Provider realm/tenant, when applicable (e.g. a Keycloak realm).
+    pub realm: Option<String>,
+    /// Organizations the identity belongs to (GitHub orgs).
+    pub organizations: Vec<String>,
+    /// Teams the identity belongs to (GitHub `org/team`).
+    pub teams: Vec<String>,
+    /// Groups the identity belongs to (OIDC groups).
+    pub groups: Vec<String>,
+    /// Roles granted to the identity (OIDC realm roles + `client/role`).
+    pub roles: Vec<String>,
+    /// Additional string/array attributes (generic OIDC claims).
+    pub attributes: BTreeMap<String, Vec<String>>,
 }
 
 /// An in-progress device-flow authentication, bound to a provider.
@@ -172,4 +233,21 @@ pub trait AuthenticationProvider: Send + Sync {
         &self,
         access_token: &str,
     ) -> Result<AuthenticatedIdentity, AuthProviderError>;
+
+    /// Resolve the authorization facts (realm/orgs/teams/groups/roles/attributes)
+    /// for an already-authenticated identity.
+    ///
+    /// Defaults to no facts so adding a provider requires only `metadata`, the
+    /// device methods, and `fetch_identity`. Providers that carry membership
+    /// information (GitHub orgs/teams, OIDC groups/roles) override this. Failures
+    /// to resolve *optional* membership should fail closed (return empty rather
+    /// than error) because authorization is deny-by-default.
+    async fn resolve_authorization(
+        &self,
+        _access_token: &str,
+        _identity: &AuthenticatedIdentity,
+        _needs: &AuthorizationNeeds,
+    ) -> Result<AuthorizationContext, AuthProviderError> {
+        Ok(AuthorizationContext::default())
+    }
 }

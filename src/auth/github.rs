@@ -9,8 +9,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::auth::provider::{
-    AuthProviderError, AuthenticatedIdentity, AuthenticationProvider, DeviceAuthorization,
-    DeviceTokenOutcome, ProviderKind, ProviderMetadata,
+    AuthProviderError, AuthenticatedIdentity, AuthenticationProvider, AuthorizationContext,
+    AuthorizationNeeds, DeviceAuthorization, DeviceTokenOutcome, ProviderKind, ProviderMetadata,
 };
 use crate::github::GitHubClient;
 
@@ -62,5 +62,50 @@ impl AuthenticationProvider for GitHubProvider {
             email: user.email,
             display_name: user.name,
         })
+    }
+
+    /// Fetch GitHub org/team membership, but only when the policy references them
+    /// (avoids extra API calls and the `read:org` scope for user-only
+    /// allowlists). Membership-lookup failures fail closed (treated as none),
+    /// which is safe under deny-by-default authorization.
+    async fn resolve_authorization(
+        &self,
+        access_token: &str,
+        _identity: &AuthenticatedIdentity,
+        needs: &AuthorizationNeeds,
+    ) -> Result<AuthorizationContext, AuthProviderError> {
+        let organizations = if needs.organizations {
+            fetch_or_empty(self.client.get_user_orgs(access_token).await, "orgs")
+        } else {
+            Vec::new()
+        };
+        let teams = if needs.teams {
+            fetch_or_empty(self.client.get_user_teams(access_token).await, "teams")
+        } else {
+            Vec::new()
+        };
+        Ok(AuthorizationContext {
+            organizations,
+            teams,
+            ..AuthorizationContext::default()
+        })
+    }
+}
+
+/// Use a successful org/team lookup, or treat a failure as "no memberships".
+fn fetch_or_empty(
+    result: Result<Vec<String>, crate::github::GitHubError>,
+    what: &str,
+) -> Vec<String> {
+    match result {
+        Ok(values) => values,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                membership = what,
+                "failed to resolve GitHub membership; treating as none for authorization",
+            );
+            Vec::new()
+        }
     }
 }

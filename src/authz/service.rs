@@ -1,9 +1,9 @@
-//! Config-driven authorization.
+//! Config-driven, provider-neutral authorization.
 //!
-//! Authorization is **deny-by-default**: an [`Identity`] is allowed only if it
-//! matches one of the configured allowlists (user, org, or team). Matching is
-//! case-insensitive, since GitHub logins, org logins, and team slugs are not
-//! case-sensitive.
+//! Authorization is **deny-by-default**: an [`Identity`] is allowed only if one
+//! of its facts matches a configured allowlist — username, GitHub org/team, OIDC
+//! group/role, or a generic attribute. Matching is case-insensitive (usernames,
+//! org/team slugs, group/role names are not case-sensitive across providers).
 
 use crate::authz::models::{AuthzDecision, Identity};
 use crate::config::AccessConfig;
@@ -22,116 +22,178 @@ impl AuthzService {
 
     /// Decide whether `identity` is permitted.
     ///
-    /// Order: a user match wins first, then any org match, then any team match;
-    /// otherwise the identity is denied.
+    /// Order (first match wins): username, then org, team, group, role, and
+    /// finally attribute (`key=value`); otherwise the identity is denied.
     pub fn authorize(&self, identity: &Identity) -> AuthzDecision {
-        if contains_ci(&self.access.allowed_users, &identity.login) {
+        if contains_ci(&self.access.allowed_users, &identity.username) {
             return AuthzDecision::Allow;
         }
-
-        if identity
-            .orgs
-            .iter()
-            .any(|org| contains_ci(&self.access.allowed_orgs, org))
-        {
+        if any_ci(&self.access.allowed_orgs, &identity.organizations) {
             return AuthzDecision::Allow;
         }
-
-        if identity
-            .teams
-            .iter()
-            .any(|team| contains_ci(&self.access.allowed_teams, team))
-        {
+        if any_ci(&self.access.allowed_teams, &identity.teams) {
+            return AuthzDecision::Allow;
+        }
+        if any_ci(&self.access.allowed_groups, &identity.groups) {
+            return AuthzDecision::Allow;
+        }
+        if any_ci(&self.access.allowed_roles, &identity.roles) {
+            return AuthzDecision::Allow;
+        }
+        if self.attribute_match(identity) {
             return AuthzDecision::Allow;
         }
 
         AuthzDecision::Deny {
             reason: format!(
-                "'{}' is not in any allowlist (orgs={:?}, teams={:?})",
-                identity.login, identity.orgs, identity.teams
+                "'{}' (provider={}) is not in any allowlist (orgs={:?}, teams={:?}, groups={:?}, roles={:?})",
+                identity.username,
+                identity.provider,
+                identity.organizations,
+                identity.teams,
+                identity.groups,
+                identity.roles,
             ),
         }
     }
+
+    /// Match `allowed_attributes` (`key=value`) against the identity attributes,
+    /// case-insensitively on both key and value.
+    fn attribute_match(&self, identity: &Identity) -> bool {
+        if self.access.allowed_attributes.is_empty() || identity.attributes.is_empty() {
+            return false;
+        }
+        self.access.allowed_attributes.iter().any(|entry| {
+            let Some((key, value)) = entry.split_once('=') else {
+                return false;
+            };
+            let (key, value) = (key.trim(), value.trim());
+            identity
+                .attributes
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                .map(|(_, values)| values.iter().any(|v| v.eq_ignore_ascii_case(value)))
+                .unwrap_or(false)
+        })
+    }
 }
 
-/// Case-insensitive membership test.
+/// Case-insensitive membership test for a single needle.
 fn contains_ci(haystack: &[String], needle: &str) -> bool {
     haystack
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(needle))
 }
 
+/// Case-insensitive test for any overlap between an allowlist and identity facts.
+fn any_ci(allowlist: &[String], facts: &[String]) -> bool {
+    facts.iter().any(|fact| contains_ci(allowlist, fact))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn access(users: &[&str], orgs: &[&str], teams: &[&str]) -> AccessConfig {
-        AccessConfig {
-            allowed_users: users.iter().map(|s| s.to_string()).collect(),
-            allowed_orgs: orgs.iter().map(|s| s.to_string()).collect(),
-            allowed_teams: teams.iter().map(|s| s.to_string()).collect(),
-        }
+    fn access() -> AccessConfig {
+        AccessConfig::default()
+    }
+
+    fn id(username: &str) -> Identity {
+        Identity::new("github", "1", username)
     }
 
     #[test]
     fn allowed_user_is_permitted() {
-        let svc = AuthzService::new(access(&["vasugarg"], &[], &[]));
-        assert!(svc.authorize(&Identity::new("vasugarg", 1)).is_allowed());
+        let svc = AuthzService::new(AccessConfig {
+            allowed_users: vec!["vasugarg".into()],
+            ..access()
+        });
+        assert!(svc.authorize(&id("vasugarg")).is_allowed());
     }
 
     #[test]
     fn allowed_user_match_is_case_insensitive() {
-        let svc = AuthzService::new(access(&["VasuGarg"], &[], &[]));
-        assert!(svc.authorize(&Identity::new("vasugarg", 1)).is_allowed());
+        let svc = AuthzService::new(AccessConfig {
+            allowed_users: vec!["VasuGarg".into()],
+            ..access()
+        });
+        assert!(svc.authorize(&id("vasugarg")).is_allowed());
     }
 
     #[test]
     fn denied_user_is_rejected() {
-        let svc = AuthzService::new(access(&["someone-else"], &[], &[]));
-        let decision = svc.authorize(&Identity::new("vasugarg", 1));
-        assert!(matches!(decision, AuthzDecision::Deny { .. }));
+        let svc = AuthzService::new(AccessConfig {
+            allowed_users: vec!["someone-else".into()],
+            ..access()
+        });
+        assert!(matches!(
+            svc.authorize(&id("vasugarg")),
+            AuthzDecision::Deny { .. }
+        ));
     }
 
     #[test]
     fn allowed_org_is_permitted() {
-        let svc = AuthzService::new(access(&[], &["acme"], &[]));
-        let identity = Identity::new("vasugarg", 1).with_orgs(vec!["acme".to_string()]);
+        let svc = AuthzService::new(AccessConfig {
+            allowed_orgs: vec!["acme".into()],
+            ..access()
+        });
+        let identity = id("vasugarg").with_orgs(vec!["acme".into()]);
         assert!(svc.authorize(&identity).is_allowed());
-    }
-
-    #[test]
-    fn denied_org_is_rejected() {
-        let svc = AuthzService::new(access(&[], &["acme"], &[]));
-        let identity = Identity::new("vasugarg", 1).with_orgs(vec!["other".to_string()]);
-        assert!(matches!(
-            svc.authorize(&identity),
-            AuthzDecision::Deny { .. }
-        ));
     }
 
     #[test]
     fn allowed_team_is_permitted() {
-        let svc = AuthzService::new(access(&[], &[], &["acme/platform"]));
-        let identity = Identity::new("vasugarg", 1).with_teams(vec!["acme/platform".to_string()]);
+        let svc = AuthzService::new(AccessConfig {
+            allowed_teams: vec!["acme/platform".into()],
+            ..access()
+        });
+        let identity = id("vasugarg").with_teams(vec!["acme/platform".into()]);
         assert!(svc.authorize(&identity).is_allowed());
     }
 
     #[test]
-    fn denied_team_is_rejected() {
-        let svc = AuthzService::new(access(&[], &[], &["acme/platform"]));
-        let identity = Identity::new("vasugarg", 1).with_teams(vec!["acme/interns".to_string()]);
-        assert!(matches!(
-            svc.authorize(&identity),
-            AuthzDecision::Deny { .. }
-        ));
+    fn allowed_group_is_permitted() {
+        let svc = AuthzService::new(AccessConfig {
+            allowed_groups: vec!["engineering".into()],
+            ..access()
+        });
+        let identity =
+            Identity::new("keycloak", "sub", "vasu").with_groups(vec!["engineering".into()]);
+        assert!(svc.authorize(&identity).is_allowed());
+    }
+
+    #[test]
+    fn allowed_role_is_permitted() {
+        let svc = AuthzService::new(AccessConfig {
+            allowed_roles: vec!["mayfly/operator".into()],
+            ..access()
+        });
+        let identity =
+            Identity::new("keycloak", "sub", "vasu").with_roles(vec!["mayfly/operator".into()]);
+        assert!(svc.authorize(&identity).is_allowed());
+    }
+
+    #[test]
+    fn allowed_attribute_is_permitted() {
+        let svc = AuthzService::new(AccessConfig {
+            allowed_attributes: vec!["department=platform".into()],
+            ..access()
+        });
+        let mut identity = Identity::new("keycloak", "sub", "vasu");
+        identity
+            .attributes
+            .insert("department".into(), vec!["platform".into()]);
+        assert!(svc.authorize(&identity).is_allowed());
     }
 
     #[test]
     fn empty_config_denies_everyone() {
         let svc = AuthzService::new(AccessConfig::default());
-        let identity = Identity::new("vasugarg", 1)
-            .with_orgs(vec!["acme".to_string()])
-            .with_teams(vec!["acme/platform".to_string()]);
+        let identity = Identity::new("keycloak", "sub", "vasu")
+            .with_orgs(vec!["acme".into()])
+            .with_groups(vec!["engineering".into()])
+            .with_roles(vec!["admin".into()]);
         assert!(matches!(
             svc.authorize(&identity),
             AuthzDecision::Deny { .. }

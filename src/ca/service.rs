@@ -149,10 +149,10 @@ impl CaKey {
     ) -> Result<CertificateResponse, CaError> {
         let ttl = validate_ttl(request.ttl_seconds)?;
 
-        let principal = request.github_login.trim();
+        let principal = request.principal.trim();
         if principal.is_empty() {
             return Err(CaError::InvalidRequest(
-                "github_login must not be empty".to_string(),
+                "principal must not be empty".to_string(),
             ));
         }
         let hostname = request.hostname.trim();
@@ -255,7 +255,7 @@ mod tests {
 
     fn request(ttl: u32) -> CertificateRequest {
         CertificateRequest {
-            github_login: "vasugarg".to_string(),
+            principal: "vasugarg".to_string(),
             hostname: "web-01".to_string(),
             public_key: user_public_key(),
             ttl_seconds: ttl,

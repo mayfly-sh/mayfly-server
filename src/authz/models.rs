@@ -1,36 +1,67 @@
-//! Authorization domain types.
+//! Authorization domain types (provider-neutral).
 
-/// The resolved GitHub identity an authorization decision is made against.
+use std::collections::BTreeMap;
+
+/// The resolved, provider-neutral identity an authorization decision is made
+/// against.
 ///
-/// Built by the certificate-issuance flow after the GitHub user (and, when the
-/// configuration requires them, org/team memberships) have been resolved.
+/// Built by the certificate-issuance/admin flow from the authenticating
+/// provider's [`crate::auth::AuthenticatedIdentity`] plus its
+/// [`crate::auth::AuthorizationContext`]. GitHub populates `organizations`/
+/// `teams`; Keycloak (OIDC) populates `realm`/`groups`/`roles`/`attributes`;
+/// `username` is the login (GitHub) or `preferred_username` (OIDC).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
-    /// GitHub login (username).
-    pub login: String,
-    /// Numeric GitHub user id.
-    pub github_id: u64,
-    /// Org logins the identity belongs to.
-    pub orgs: Vec<String>,
-    /// Teams the identity belongs to, formatted `org-login/team-slug`.
+    /// Provider id that authenticated this identity (e.g. `github`, `keycloak`).
+    pub provider: String,
+    /// Stable, provider-unique subject (GitHub numeric id, OIDC `sub`).
+    pub subject: String,
+    /// Human username/login (GitHub login, OIDC `preferred_username`).
+    pub username: String,
+    /// Email, when available.
+    pub email: Option<String>,
+    /// Display name, when available.
+    pub display_name: Option<String>,
+    /// Provider realm/tenant, when applicable (Keycloak realm).
+    pub realm: Option<String>,
+    /// Organizations the identity belongs to (GitHub orgs).
+    pub organizations: Vec<String>,
+    /// Teams the identity belongs to (GitHub `org/team`).
     pub teams: Vec<String>,
+    /// Groups the identity belongs to (OIDC groups).
+    pub groups: Vec<String>,
+    /// Roles granted to the identity (OIDC realm roles + `client/role`).
+    pub roles: Vec<String>,
+    /// Additional string/array attributes (generic OIDC claims).
+    pub attributes: BTreeMap<String, Vec<String>>,
 }
 
 impl Identity {
-    /// Convenience constructor for a login-only identity (no org/team data).
-    pub fn new(login: impl Into<String>, github_id: u64) -> Self {
+    /// Convenience constructor for a username-only identity (no memberships).
+    pub fn new(
+        provider: impl Into<String>,
+        subject: impl Into<String>,
+        username: impl Into<String>,
+    ) -> Self {
         Self {
-            login: login.into(),
-            github_id,
-            orgs: Vec::new(),
+            provider: provider.into(),
+            subject: subject.into(),
+            username: username.into(),
+            email: None,
+            display_name: None,
+            realm: None,
+            organizations: Vec::new(),
             teams: Vec::new(),
+            groups: Vec::new(),
+            roles: Vec::new(),
+            attributes: BTreeMap::new(),
         }
     }
 
     /// Attach org memberships (builder style).
     #[must_use]
     pub fn with_orgs(mut self, orgs: Vec<String>) -> Self {
-        self.orgs = orgs;
+        self.organizations = orgs;
         self
     }
 
@@ -38,6 +69,20 @@ impl Identity {
     #[must_use]
     pub fn with_teams(mut self, teams: Vec<String>) -> Self {
         self.teams = teams;
+        self
+    }
+
+    /// Attach group memberships (builder style).
+    #[must_use]
+    pub fn with_groups(mut self, groups: Vec<String>) -> Self {
+        self.groups = groups;
+        self
+    }
+
+    /// Attach roles (builder style).
+    #[must_use]
+    pub fn with_roles(mut self, roles: Vec<String>) -> Self {
+        self.roles = roles;
         self
     }
 }
