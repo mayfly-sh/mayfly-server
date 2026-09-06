@@ -1,0 +1,11 @@
+{
+  "description": "Zero-trust SSH certificate authority and control plane. Issues short-lived OpenSSH user certificates to authenticated, explicitly authorized engineers instead of distributing long-lived SSH keys, with every issuance and denial recorded in a tamper-evident audit log.",
+  "projectType": "Control Plane",
+  "stack": ["OpenSSH Certificates", "OAuth2 Device Flow", "OIDC", "TLS 1.3", "SQLite", "Ed25519"],
+  "highlights": [
+    "Pluggable identity providers — GitHub and Keycloak/OIDC behind one provider abstraction, selectable per request",
+    "Deny-by-default authorization via provider-neutral allowlists (GitHub user/org/team, OIDC group/role/attribute)",
+    "Manages 1-64 Ed25519 certificate authorities with encrypted keys at rest, administered entirely through an admin API and CLI",
+    "Short-lived certificates (default 5 minute TTL, 1 hour max) with a SHA-256 hash-chained, fail-closed audit log"
+  ]
+}
